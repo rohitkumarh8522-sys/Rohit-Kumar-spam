@@ -1,0 +1,5 @@
+python-telegram-bot
+telethon
+tgcrypto
+qrcode
+pillow
