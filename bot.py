@@ -5,6 +5,7 @@ import random
 import json
 import qrcode
 import io
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telethon import TelegramClient, events
@@ -17,10 +18,13 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 
+# --- APKE APNE TELEGRAM USER ID YAHAN DAALEIN (ADMIN) ---
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789")) # Yahan apni Telegram ID dalein
+
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
 
-MESSAGES_FILE = "messages_data.json"
+DATA_FILE = "bot_data.json"
 USER_ACCOUNTS = []
 IS_RUNNING = False
 TOTAL_MESSAGES_SENT = 0
@@ -28,30 +32,64 @@ TOTAL_MESSAGES_SENT = 0
 logging.basicConfig(level=logging.INFO)
 LOGIN_DATA = {}
 
-def load_persisted_data():
-    if not os.path.exists(MESSAGES_FILE):
-        return {}
+# --- PERSISTENT STORAGE (USERS, SUBSCRIPTIONS & MESSAGES) ---
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"subscriptions": {}, "accounts_data": {}}
     try:
-        with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"Error loading messages file: {e}")
-        return {}
+        print(f"Error loading data: {e}")
+        return {"subscriptions": {}, "accounts_data": {}}
 
-def save_persisted_data():
-    data = {}
-    for acc in USER_ACCOUNTS:
-        data[acc['phone']] = {
-            'messages': acc['messages'],
-            'group_delay': acc.get('group_delay', 2),
-            'resend_interval': acc.get('resend_interval', 60),
-            'auto_reply': acc.get('auto_reply', '')
-        }
+def save_data(data):
     try:
-        with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"Error saving messages file: {e}")
+        print(f"Error saving data: {e}")
+
+def get_user_subscription(user_id, username=""):
+    data = load_data()
+    subs = data.get("subscriptions", {})
+    
+    # Admin has lifetime unlimited access
+    if user_id == ADMIN_USER_ID:
+        return {"active": True, "expires": "Lifetime"}
+        
+    str_id = str(user_id)
+    if str_id in subs:
+        expiry_str = subs[str_id]["expires"]
+        expiry_time = datetime.fromisoformat(expiry_str)
+        if datetime.now() < expiry_time:
+            remaining = expiry_time - datetime.now()
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds % 3600) // 60
+            time_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
+            return {"active": True, "expires": time_str}
+        else:
+            return {"active": False, "expires": "Expired"}
+    return {"active": False, "expires": "No Access"}
+
+async def check_access(update: Update):
+    user = update.effective_user
+    if not user:
+        return False
+    
+    if user.id == ADMIN_USER_ID:
+        return True
+        
+    sub = get_user_subscription(user.id, user.username)
+    if not sub["active"]:
+        await update.effective_message.reply_text(
+            "❌ <b>Your time is up!</b>\n\n"
+            "If you want to purchase more time or get access, contact the admin.",
+            parse_mode="HTML"
+        )
+        return False
+    return True
 
 async def keep_client_alive(client):
     while True:
@@ -63,7 +101,6 @@ async def keep_client_alive(client):
             print(f"Ping Error: {e}")
         await asyncio.sleep(20)
 
-# --- DM AUTO-RESPONDER HANDLER FOR TELETHON CLIENTS ---
 def setup_dm_handler(client, acc):
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def dm_auto_responder(event):
@@ -79,7 +116,8 @@ async def load_saved_sessions():
     if not os.path.exists(SESSION_DIR):
         return
 
-    saved_data = load_persisted_data()
+    data = load_data()
+    accounts_meta = data.get("accounts_data", {})
 
     for filename in os.listdir(SESSION_DIR):
         if filename.endswith(".session"):
@@ -95,98 +133,62 @@ async def load_saved_sessions():
                     if not any(acc['phone'] == phone for acc in USER_ACCOUNTS):
                         asyncio.create_task(keep_client_alive(client))
                         
-                        acc_info = saved_data.get(phone, {})
-                        acc_messages = acc_info.get('messages', [])
-                        group_delay = acc_info.get('group_delay', 2)
-                        resend_interval = acc_info.get('resend_interval', 60)
-                        auto_reply = acc_info.get('auto_reply', '')
-
+                        meta = accounts_meta.get(phone, {})
                         acc_dict = {
                             'phone': phone,
                             'client': client,
                             'active': True,
-                            'messages': acc_messages,
-                            'group_delay': group_delay,
-                            'resend_interval': resend_interval,
-                            'auto_reply': auto_reply
+                            'messages': meta.get('messages', []),
+                            'group_delay': meta.get('group_delay', 2),
+                            'resend_interval': meta.get('resend_interval', 60),
+                            'auto_reply': meta.get('auto_reply', '')
                         }
                         setup_dm_handler(client, acc_dict)
                         USER_ACCOUNTS.append(acc_dict)
-                        print(f"Successfully loaded session: {phone}")
                 else:
                     await client.disconnect()
             except Exception as e:
                 print(f"Failed to load session {filename}: {e}")
 
-async def show_manage_menu(query, page=0):
-    if not USER_ACCOUNTS:
-        await query.message.reply_text("❌ Koi bhi account login nahi hai!")
+def save_account_meta_to_disk():
+    data = load_data()
+    acc_data = {}
+    for acc in USER_ACCOUNTS:
+        acc_data[acc['phone']] = {
+            'messages': acc['messages'],
+            'group_delay': acc.get('group_delay', 2),
+            'resend_interval': acc.get('resend_interval', 60),
+            'auto_reply': acc.get('auto_reply', '')
+        }
+    data["accounts_data"] = acc_data
+    save_data(data)
+
+# --- MENUS & INTERFACES ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not await check_access(update):
         return
 
-    per_page = 4  
-    total_accounts = len(USER_ACCOUNTS)
-    total_pages = (total_accounts + per_page - 1) // per_page
-    if total_pages == 0: 
-        total_pages = 1
-     
-    page = max(0, min(page, total_pages - 1))
-    start_idx = page * per_page
-    current_accounts = USER_ACCOUNTS[start_idx:start_idx + per_page]
-     
-    keyboard = []
-    for offset, acc in enumerate(current_accounts):
-        index = start_idx + offset
-        status_icon = "🟢 ON" if acc['active'] else "🔴 OFF"
-        msg_count = len(acc['messages'])
-        serial_no = index + 1  
-         
-        keyboard.append([
-            InlineKeyboardButton(f"{serial_no}. {acc['phone']} ({msg_count} msgs) : {status_icon}", callback_data=f"toggle_acc_{index}"),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("📝 Msg", callback_data=f"set_acc_msg_{index}"),
-            InlineKeyboardButton(f"⚙️ Timers", callback_data=f"set_acc_timers_{index}"),
-            InlineKeyboardButton("🤖 DM Reply", callback_data=f"set_dm_reply_{index}"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"delete_acc_{index}")
-        ])
-     
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"manage_page_{page - 1}"))
-    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="noop_page"))
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"manage_page_{page + 1}"))
-     
-    if nav_row:
-        keyboard.append(nav_row)
-         
-    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")])
-     
-    markup = InlineKeyboardMarkup(keyboard)
-    try:
-        await query.message.edit_text(
-            f"📱 <b>Manage Accounts & Settings (Page {page + 1}/{total_pages}):</b>\n"
-            "• <b>📝 Msg:</b> Bulk broadcast messages set karein.\n"
-            "• <b>⚙️ Timers:</b> Group delay & Resend interval set karein.\n"
-            "• <b>🤖 DM Reply:</b> Koi personal message kare toh automatic kya reply jaye.", 
-            reply_markup=markup, parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sub = get_user_subscription(user.id, user.username)
+    time_left = sub["expires"]
+    
     status_str = "▶️ RUNNING" if IS_RUNNING else "⏹ STOPPED"
     active_count = sum(1 for acc in USER_ACCOUNTS if acc['active'])
-    total_messages = sum(len(acc['messages']) for acc in USER_ACCOUNTS)
+    
+    # Get first account's timer configs for display if available
+    speed_str = "2-5s"
+    cycle_str = "60s"
+    if USER_ACCOUNTS:
+        speed_str = f"{USER_ACCOUNTS[0].get('group_delay', 2)}s"
+        cycle_str = f"{USER_ACCOUNTS[0].get('resend_interval', 60)}s"
 
     text = (
         "✨ <b>Master Control Bot</b> ✨\n"
         "👤 <b>User Panel</b>\n"
-        f"📊 <b>Status:</b> {status_str}\n"
-        f"💬 <b>Total Saved Messages:</b> {total_messages}\n"
-        f"📈 <b>Accounts:</b> {len(USER_ACCOUNTS)} (Running: {active_count})\n"
+        f"⏳ <b>Time:</b> {time_left}\n\n"
+        f"📊 <b>Accounts:</b> {len(USER_ACCOUNTS)} (Running: {active_count})\n"
         f"📨 <b>Messages Sent:</b> {TOTAL_MESSAGES_SENT}\n"
-        f"⚡ <b>Speed & Cycle:</b> Custom per account"
+        f"⚡ <b>Speed:</b> {speed_str} | 🔄 <b>Cycle:</b> {cycle_str}"
     )
 
     keyboard = [
@@ -195,16 +197,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("⏹ Stop All", callback_data="stop_all")
         ],
         [
-            InlineKeyboardButton("📱 Manage Accounts & Settings", callback_data="manage_accounts")
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings_menu")
         ],
         [
             InlineKeyboardButton("🔑 Session Login", callback_data="login_session"),
             InlineKeyboardButton("📱 Phone Login", callback_data="login_phone")
         ],
         [
-            InlineKeyboardButton("🗑 Delete Account", callback_data="manage_accounts")
+            InlineKeyboardButton("🗑 Delete Account", callback_data="delete_account_menu")
         ]
     ]
+
+    if user.id == ADMIN_USER_ID:
+        keyboard.append([InlineKeyboardButton("👑 Admin Panel (Add Access)", callback_data="admin_panel")])
 
     markup = InlineKeyboardMarkup(keyboard)
      
@@ -216,6 +221,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
+async def settings_menu(query):
+    keyboard = [
+        [InlineKeyboardButton("📝 Set Broadcast Messages", callback_data="set_broadcast_msg")],
+        [InlineKeyboardButton("🤖 Set DM Auto-Reply", callback_data="set_dm_msg")],
+        [InlineKeyboardButton("⏱ Set Cycle & Speed Timers", callback_data="set_timers_menu")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    await query.message.edit_text(
+        "⚙️ <b>Settings Menu</b>\n\nYahan se aap broadcast messages, DM auto-reply aur timers configure kar sakte hain:",
+        reply_markup=markup, parse_mode="HTML"
+    )
+
+async def delete_account_menu(query, page=0):
+    if not USER_ACCOUNTS:
+        await query.message.edit_text(
+            "❌ Koi bhi account login nahi hai!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_home")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = (len(USER_ACCOUNTS) + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+    current_accs = USER_ACCOUNTS[page * per_page : (page + 1) * per_page]
+
+    keyboard = []
+    for idx, acc in enumerate(current_accs):
+        actual_idx = (page * per_page) + idx
+        keyboard.append([InlineKeyboardButton(f"🗑 Remove {acc['phone']}", callback_data=f"del_acc_{actual_idx}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"del_page_{page-1}"))
+    nav.append(InlineKeyboardButton(f"📄 {page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"del_page_{page+1}"))
+    if nav:
+        keyboard.append(nav)
+
+    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")])
+    await query.message.edit_text(
+        "🗑 <b>Delete Account Management</b>\nJis account ko remove karna ho us par click karein:",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
+    )
+
+# --- BROADCAST LOOP ---
 async def broadcast_for_account(acc):
     global TOTAL_MESSAGES_SENT
     client = acc['client']
@@ -259,29 +311,31 @@ async def run_broadcast_loop():
             continue
         await asyncio.gather(*(broadcast_for_account(acc) for acc in active_clients))
 
+# --- BUTTON HANDLER ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING
     query = update.callback_query
     if not query or not query.message:
         return
     await query.answer()
+    
+    if not await check_access(update):
+        return
+
     data = query.data
 
     if data == "start_all":
-        active_clients = [acc for acc in USER_ACCOUNTS if acc['active']]
-        if not active_clients:
-            await query.message.reply_text("❌ Pehle kam se kam 1 Active Account hona chahiye!")
+        if not USER_ACCOUNTS:
+            await query.message.reply_text("❌ Pehle kam se kam 1 account login karein!")
             return
-         
-        accounts_with_msgs = [acc for acc in active_clients if acc['messages']]
-        if not accounts_with_msgs:
-            await query.message.reply_text("❌ Kisi bhi active account me messages add nahi hain!")
+        if not any(acc['messages'] for acc in USER_ACCOUNTS):
+            await query.message.reply_text("❌ Kisi bhi account me broadcast messages set nahi hain! Settings me jaakar set karein.")
             return
          
         if not IS_RUNNING:
             IS_RUNNING = True
             asyncio.create_task(run_broadcast_loop())
-            await query.message.reply_text("✅ Sabhi accounts simultaneous broadcast start kar chuke hain!")
+            await query.message.reply_text("✅ Broadcast start kar diya gaya hai!")
         else:
             await query.message.reply_text("⚠️ Broadcast pehle se running hai!")
 
@@ -289,126 +343,122 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         IS_RUNNING = False
         await query.message.reply_text("⏹ Broadcasts stop kar diye gaye hain.")
 
+    elif data == "settings_menu":
+        await settings_menu(query)
+
+    elif data == "set_broadcast_msg":
+        if not USER_ACCOUNTS:
+            await query.message.reply_text("❌ Pehle account login karein!")
+            return
+        context.user_data['state'] = 'WAITING_GLOBAL_MSG'
+        await query.message.reply_text("📝 Sabhi active accounts ke liye **Broadcast Messages** bhejayein.\n(Har nayi line ek naya message ban jayegi):", parse_mode="HTML")
+
+    elif data == "set_dm_msg":
+        if not USER_ACCOUNTS:
+            await query.message.reply_text("❌ Pehle account login karein!")
+            return
+        context.user_data['state'] = 'WAITING_GLOBAL_DM'
+        await query.message.reply_text("🤖 Sabhi accounts ke liye **DM Auto-Reply** message bhejayein:", parse_mode="HTML")
+
+    elif data == "set_timers_menu":
+        context.user_data['state'] = 'WAITING_TIMERS'
+        await query.message.reply_text(
+            "⏱ **Timers Set Karein**\n"
+            "Format bhejayein: <code>[Group Delay (secs)] [Cycle Interval (secs)]</code>\n"
+            "Example: <code>3 60</code> (Matlab har message me 3 sec gap, aur pura cycle 60 sec baad repeat)",
+            parse_mode="HTML"
+        )
+
     elif data == "login_phone":
-        if context.user_data is not None:
-            context.user_data['state'] = 'WAITING_PHONE'
+        context.user_data['state'] = 'WAITING_PHONE'
         await query.message.reply_text("📱 Apna Phone Number country code ke sath bhejayein (jaise +919876543210):")
 
     elif data == "login_session":
-        if context.user_data is not None:
-            context.user_data['state'] = 'WAITING_STRING_SESSION'
+        context.user_data['state'] = 'WAITING_STRING_SESSION'
         await query.message.reply_text("🔑 Apni Telethon String Session yahan bhejayein:")
 
-    elif data == "manage_accounts":
-        await show_manage_menu(query, page=0)
-        return
+    elif data == "delete_account_menu":
+        await delete_account_menu(query, page=0)
 
-    elif data.startswith("manage_page_"):
+    elif data.startswith("del_page_"):
         page_num = int(data.split("_")[2])
-        await show_manage_menu(query, page=page_num)
-        return
+        await delete_account_menu(query, page=page_num)
 
-    elif data.startswith("toggle_acc_"):
+    elif data.startswith("del_acc_"):
         idx = int(data.split("_")[2])
         if idx < len(USER_ACCOUNTS):
-            USER_ACCOUNTS[idx]['active'] = not USER_ACCOUNTS[idx]['active']
-        per_page = 4
-        current_page = idx // per_page
-        await show_manage_menu(query, page=current_page)
-        return
-
-    elif data.startswith("set_acc_msg_"):
-        idx = int(data.split("_")[3])
-        if idx < len(USER_ACCOUNTS):
-            if context.user_data is not None:
-                context.user_data['state'] = 'WAITING_ACC_MSG'
-                context.user_data['target_acc_index'] = idx
-            acc_phone = USER_ACCOUNTS[idx]['phone']
-            await query.message.reply_text(
-                f"📝 Account <b>{acc_phone}</b> ke liye bulk messages bhejayein (Har line ek naya message):",
-                parse_mode="HTML"
-            )
-        return
-
-    elif data.startswith("set_acc_timers_"):
-        idx = int(data.split("_")[3])
-        if idx < len(USER_ACCOUNTS):
-            if context.user_data is not None:
-                context.user_data['state'] = 'WAITING_ACC_TIMERS'
-                context.user_data['target_acc_index'] = idx
-            acc_phone = USER_ACCOUNTS[idx]['phone']
-            await query.message.reply_text(
-                f"⚙️ Account <b>{acc_phone}</b> ke liye timers is format me bhejayein:\n"
-                "<b>[Group Delay] [Resend Interval]</b> (e.g., <code>3 60</code>)",
-                parse_mode="HTML"
-            )
-        return
-
-    elif data.startswith("set_dm_reply_"):
-        idx = int(data.split("_")[3])
-        if idx < len(USER_ACCOUNTS):
-            if context.user_data is not None:
-                context.user_data['state'] = 'WAITING_DM_REPLY'
-                context.user_data['target_acc_index'] = idx
-            acc_phone = USER_ACCOUNTS[idx]['phone']
-            await query.message.reply_text(
-                f"🤖 Account <b>{acc_phone}</b> ke liye Auto DM Reply text bhejayein:",
-                parse_mode="HTML"
-            )
-        return
-
-    elif data.startswith("delete_acc_"):
-        idx = int(data.split("_")[2])
-        if idx < len(USER_ACCOUNTS):
-            acc_to_del = USER_ACCOUNTS[idx]
+            acc = USER_ACCOUNTS.pop(idx)
             try:
-                await acc_to_del['client'].disconnect()
-                session_file = f"{acc_to_del['client'].session.filename}.session"
-                if os.path.exists(session_file):
-                    os.remove(session_file)
-            except Exception as e:
-                print(f"Error deleting session file: {e}")
-                 
-            removed = USER_ACCOUNTS.pop(idx)
-            save_persisted_data()
-            await query.message.reply_text(f"🗑 Account {removed['phone']} remove kar diya gaya.")
-        per_page = 4
-        current_page = idx // per_page
-        if current_page * per_page >= len(USER_ACCOUNTS) and current_page > 0:
-            current_page -= 1
-        await show_manage_menu(query, page=current_page)
-        return
+                await acc['client'].disconnect()
+                s_file = f"{acc['client'].session.filename}.session"
+                if os.path.exists(s_file):
+                    os.remove(s_file)
+            except:
+                pass
+            save_account_meta_to_disk()
+            await query.message.reply_text(f"🗑 Account {acc['phone']} successfully remove kar diya gaya.")
+            await delete_account_menu(query, page=0)
+
+    elif data == "admin_panel":
+        if query.from_user.id != ADMIN_USER_ID:
+            await query.answer("❌ You are not admin!", show_alert=True)
+            return
+        context.user_data['state'] = 'WAITING_ADMIN_GRANT'
+        await query.message.reply_text(
+            "👑 **Admin Access Manager**\n\n"
+            "User ko access dene ke liye is format me bhejayein:\n"
+            "<code>[Telegram Username/ID] [Days]</code>\n"
+            "Example: <code>@username 30</code> (30 days access)",
+            parse_mode="HTML"
+        )
 
     elif data == "back_home":
         await start(update, context)
-        return
 
-    else:
-        await start(update, context)
-
+# --- TEXT HANDLER & ADMIN LOGIC ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not context.user_data:
         return
+        
+    user = update.effective_user
+    if user.id != ADMIN_USER_ID and not await check_access(update):
+        return
+
     state = context.user_data.get('state')
     user_text = update.message.text.strip() if update.message.text else ""
-    user_id = update.message.from_user.id
+
+    if state == 'WAITING_ADMIN_GRANT' and user.id == ADMIN_USER_ID:
+        try:
+            parts = user_text.split()
+            target = parts[0].replace("@", "")
+            days = int(parts[1])
+            
+            data = load_data()
+            expiry = datetime.now() + timedelta(days=days)
+            data["subscriptions"][target] = {"expires": expiry.isoformat()}
+            save_data(data)
+            
+            context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Success! User <code>{target}</code> ko {days} din ka bot access de diya gaya hai.", parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>username 30</code>", parse_mode="HTML")
+        return
 
     if state == 'WAITING_PHONE':
         phone_num = user_text
         context.user_data['phone'] = phone_num
-        session_path = os.path.join(SESSION_DIR, f"phone_acc_{user_id}_{int(asyncio.get_event_loop().time())}")
-        client = TelegramClient(session_path, API_ID, API_HASH)
+        s_path = os.path.join(SESSION_DIR, f"phone_{user.id}_{int(asyncio.get_event_loop().time())}")
+        client = TelegramClient(s_path, API_ID, API_HASH)
         await client.connect()
         try:
             sent = await client.send_code_request(phone_num)
             context.user_data['phone_client'] = client
             context.user_data['phone_hash'] = sent.phone_code_hash
-            context.user_data['session_path'] = session_path
             context.user_data['state'] = 'WAITING_PHONE_CODE'
             await update.message.reply_text("📨 Telegram OTP code bhej diya gaya hai. Code yahan enter karein:")
         except Exception as e:
             await client.disconnect()
-            await update.message.reply_text(f"❌ Error sending code: {e}")
+            await update.message.reply_text(f"❌ Error: {e}")
             context.user_data['state'] = None
 
     elif state == 'WAITING_PHONE_CODE':
@@ -424,25 +474,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client(UpdateStatusRequest(offline=False))
             asyncio.create_task(keep_client_alive(client))
             
-            acc_dict = {
-                'phone': phone, 
-                'client': client, 
-                'active': True, 
-                'messages': [], 
-                'group_delay': 2, 
-                'resend_interval': 60,
-                'auto_reply': ''
-            }
+            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
             setup_dm_handler(client, acc_dict)
             USER_ACCOUNTS.append(acc_dict)
-            save_persisted_data()
+            save_account_meta_to_disk()
             await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya!", parse_mode="HTML")
             context.user_data['state'] = None
         except SessionPasswordNeededError:
             context.user_data['state'] = 'WAITING_PHONE_PASSWORD'
             await update.message.reply_text("🔒 2-Step Verification password enter karein:")
         except Exception as e:
-            await update.message.reply_text(f"❌ Sign in error: {e}")
+            await update.message.reply_text(f"❌ Error: {e}")
             await client.disconnect()
             context.user_data['state'] = None
 
@@ -458,116 +500,77 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client(UpdateStatusRequest(offline=False))
             asyncio.create_task(keep_client_alive(client))
             
-            acc_dict = {
-                'phone': phone, 
-                'client': client, 
-                'active': True, 
-                'messages': [], 
-                'group_delay': 2, 
-                'resend_interval': 60,
-                'auto_reply': ''
-            }
+            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
             setup_dm_handler(client, acc_dict)
             USER_ACCOUNTS.append(acc_dict)
-            save_persisted_data()
+            save_account_meta_to_disk()
             await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
             context.user_data['state'] = None
         except Exception as e:
-            await update.message.reply_text(f"❌ Password Error: {e}")
+            await update.message.reply_text(f"❌ Error: {e}")
             await client.disconnect()
             context.user_data['state'] = None
 
     elif state == 'WAITING_STRING_SESSION':
         string_session = user_text
-        session_path = os.path.join(SESSION_DIR, f"str_acc_{user_id}_{int(asyncio.get_event_loop().time())}")
+        s_path = os.path.join(SESSION_DIR, f"str_{user.id}_{int(asyncio.get_event_loop().time())}")
         client = TelegramClient(StringSession(string_session), API_ID, API_HASH)
         try:
             await client.connect()
             if await client.is_user_authorized():
                 me = await client.get_me()
-                phone = f"+{me.phone}" if me and me.phone else f"Session_{user_id}"
+                phone = f"+{me.phone}" if me and me.phone else f"Session_{user.id}"
                 
-                # Save string session to file properly
-                with open(f"{session_path}.session", "w") as f:
+                with open(f"{s_path}.session", "w") as f:
                     f.write(client.session.save())
                 
                 asyncio.create_task(keep_client_alive(client))
-                acc_dict = {
-                    'phone': phone, 
-                    'client': client, 
-                    'active': True, 
-                    'messages': [], 
-                    'group_delay': 2, 
-                    'resend_interval': 60,
-                    'auto_reply': ''
-                }
+                acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
                 setup_dm_handler(client, acc_dict)
                 USER_ACCOUNTS.append(acc_dict)
-                save_persisted_data()
-                await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> successfully added!", parse_mode="HTML")
+                save_account_meta_to_disk()
+                await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> added!", parse_mode="HTML")
             else:
                 await update.message.reply_text("❌ Invalid Session String!")
             context.user_data['state'] = None
         except Exception as e:
-            await update.message.reply_text(f"❌ Session Error: {e}")
+            await update.message.reply_text(f"❌ Error: {e}")
             context.user_data['state'] = None
 
-    elif state == 'WAITING_ACC_MSG':
-        idx = context.user_data.get('target_acc_index')
-        if idx is not None and idx < len(USER_ACCOUNTS):
-            if user_text:
-                lines = [line.strip() for line in user_text.split('\n') if line.strip()]
-                USER_ACCOUNTS[idx]['messages'].extend(lines)
-                save_persisted_data()
-                acc_phone = USER_ACCOUNTS[idx]['phone']
-                context.user_data['state'] = None
-                context.user_data['target_acc_index'] = None
-                await update.message.reply_text(
-                    f"✅ Account {acc_phone} ke liye {len(lines)} messages add ho gaye!\n"
-                    f"Total messages: {len(USER_ACCOUNTS[idx]['messages'])}"
-                )
+    elif state == 'WAITING_GLOBAL_MSG':
+        lines = [l.strip() for l in user_text.split('\n') if l.strip()]
+        for acc in USER_ACCOUNTS:
+            acc['messages'] = lines
+        save_account_meta_to_disk()
+        context.user_data['state'] = None
+        await update.message.reply_text(f"✅ Sabhi accounts ke liye {len(lines)} Broadcast Messages set kar diye gaye hain!")
 
-    elif state == 'WAITING_ACC_TIMERS':
-        idx = context.user_data.get('target_acc_index')
-        if idx is not None and idx < len(USER_ACCOUNTS):
-            try:
-                parts = user_text.split()
-                g_delay = int(parts[0])
-                r_interval = int(parts[1])
-                 
-                USER_ACCOUNTS[idx]['group_delay'] = g_delay
-                USER_ACCOUNTS[idx]['resend_interval'] = r_interval
-                save_persisted_data()
-                acc_phone = USER_ACCOUNTS[idx]['phone']
-                 
-                context.user_data['state'] = None
-                context.user_data['target_acc_index'] = None
-                await update.message.reply_text(
-                    f"✅ Account {acc_phone} ke timers update ho gaye:\n"
-                    f"• Group Delay: <b>{g_delay}s</b>\n"
-                    f"• Resend Interval: <b>{r_interval}s</b>",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                await update.message.reply_text("❌ Sahi format me value dalein. Example: <code>3 60</code>", parse_mode="HTML")
+    elif state == 'WAITING_GLOBAL_DM':
+        for acc in USER_ACCOUNTS:
+            acc['auto_reply'] = user_text
+        save_account_meta_to_disk()
+        context.user_data['state'] = None
+        await update.message.reply_text(f"✅ Sabhi accounts ke liye DM Auto-Reply set ho gaya:\n<code>{user_text}</code>", parse_mode="HTML")
 
-    elif state == 'WAITING_DM_REPLY':
-        idx = context.user_data.get('target_acc_index')
-        if idx is not None and idx < len(USER_ACCOUNTS):
-            USER_ACCOUNTS[idx]['auto_reply'] = user_text
-            save_persisted_data()
-            acc_phone = USER_ACCOUNTS[idx]['phone']
+    elif state == 'WAITING_TIMERS':
+        try:
+            parts = user_text.split()
+            g_delay = int(parts[0])
+            r_interval = int(parts[1])
+            for acc in USER_ACCOUNTS:
+                acc['group_delay'] = g_delay
+                acc.get['resend_interval'] = r_interval if 'resend_interval' in acc else 60 # safe fallback
+                acc['resend_interval'] = r_interval
+            save_account_meta_to_disk()
             context.user_data['state'] = None
-            context.user_data['target_acc_index'] = None
-            await update.message.reply_text(
-                f"✅ Account {acc_phone} ka DM Auto-Reply set ho gaya:\n<code>{user_text}</code>",
-                parse_mode="HTML"
-            )
+            await update.message.reply_text(f"✅ Timers updated successfully!\n• Group Delay: {g_delay}s\n• Cycle Interval: {r_interval}s")
+        except:
+            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>3 60</code>", parse_mode="HTML")
 
 async def post_init(application):
-    print("Loading sessions and data...")
+    print("Loading sessions...")
     await load_saved_sessions()
-    print(f"Total accounts loaded: {len(USER_ACCOUNTS)}")
+    print(f"Loaded {len(USER_ACCOUNTS)} accounts.")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
@@ -575,5 +578,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Advanced Bot is running...")
+    print("Paid Master Bot is running...")
     app.run_polling()
