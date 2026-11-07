@@ -13,7 +13,7 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.account import UpdateStatusRequest
 from telethon.tl.functions.users import GetFullUserRequest
 
---- CONFIGURATION ---
+# --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
@@ -30,7 +30,7 @@ IS_RUNNING = False
 logging.basicConfig(level=logging.INFO)
 LOGIN_DATA = {}
 
---- JSON PERSISTENCE FUNCTIONS FOR MESSAGES & TIMERS ---
+# --- JSON PERSISTENCE FUNCTIONS FOR MESSAGES & TIMERS ---
 def load_persisted_data():
     if not os.path.exists(MESSAGES_FILE):
         return {}
@@ -55,7 +55,7 @@ def save_persisted_data():
     except Exception as e:
         print(f"Error saving messages file: {e}")
 
---- KEEP ALIVE BACKGROUND TASK ---
+# --- KEEP ALIVE BACKGROUND TASK ---
 async def keep_client_alive(client):
     while True:
         try:
@@ -66,7 +66,7 @@ async def keep_client_alive(client):
             print(f"Ping Error: {e}")
         await asyncio.sleep(20)
 
---- AUTO-LOAD EXISTING SESSIONS & SAVED DATA ON STARTUP ---
+# --- AUTO-LOAD EXISTING SESSIONS & SAVED DATA ON STARTUP ---
 async def load_saved_sessions():
     global USER_ACCOUNTS
     if not os.path.exists(SESSION_DIR):
@@ -107,7 +107,7 @@ async def load_saved_sessions():
             except Exception as e:
                 print(f"Failed to load session {filename}: {e}")
 
---- HELPER: MANAGE MENU UI WITH PAGINATION ---
+# --- HELPER: MANAGE MENU UI WITH PAGINATION ---
 async def show_manage_menu(query, page=0):
     if not USER_ACCOUNTS:
         await query.message.reply_text("❌ Koi bhi account login nahi hai!")
@@ -163,7 +163,7 @@ async def show_manage_menu(query, page=0):
     except Exception:
         pass
 
---- TELEGRAM BOT MENU ---
+# --- TELEGRAM BOT MENU ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_str = "▶️ RUNNING" if IS_RUNNING else "⏹ STOPPED"
     active_count = sum(1 for acc in USER_ACCOUNTS if acc['active'])
@@ -200,7 +200,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
---- CONCURRENT PARALLEL BROADCAST ---
+# --- CONCURRENT PARALLEL BROADCAST ---
 async def broadcast_for_account(acc):
     client = acc['client']
     while IS_RUNNING:
@@ -242,7 +242,7 @@ async def run_broadcast_loop():
             continue
         await asyncio.gather(*(broadcast_for_account(acc) for acc in active_clients))
 
---- BUTTON CLICK HANDLERS ---
+# --- BUTTON CLICK HANDLERS ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING
     query = update.callback_query
@@ -279,7 +279,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("📱 Apna Phone Number country code ke sath bhejayein (jaise +919876543210):")
 
     elif data == "login_qr":
-        await query.message.reply_text("🔄 Naya QR Code generate ho raha hai, kripya intezaar karein...")
+        await query.message.reply_text("🔄 Naya QR Code generate ho raha hai, kripya intezaار karein...")
         asyncio.create_task(process_qr_login(query, context))
 
     elif data == "manage_accounts":
@@ -357,7 +357,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await start(update, context)
 
---- BULLET-PROOF QR LOGIN PROCESSOR ---
+# --- BULLET-PROOF QR LOGIN PROCESSOR ---
 async def process_qr_login(query, context):
     user_id = query.from_user.id
     unique_id = int(asyncio.get_event_loop().time())
@@ -422,7 +422,7 @@ async def process_qr_login(query, context):
             pass
         await query.message.reply_text(f"❌ QR Login Error: {e}")
 
---- TEXT MESSAGE HANDLER ---
+# --- TEXT MESSAGE HANDLER ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not context.user_data:
         return
