@@ -187,7 +187,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ <b>Speed:</b> {speed_str} | 🔄 <b>Cycle:</b> {cycle_str}"
     )
 
-    # EXACT BUTTON LAYOUT: Start/Stop ek line me, Settings niche, Session & Phone upar-neeche, Delete account aakhiri me
+    # EXACT BUTTON LAYOUT REQUESTED
     keyboard = [
         [
             InlineKeyboardButton("▶️ Start All", callback_data="start_all"),
@@ -238,37 +238,47 @@ async def settings_menu(query):
             reply_markup=markup, parse_mode="HTML"
         )
 
-# --- ADMIN COMMAND & PANEL ---
+# --- INTERACTIVE ADMIN PANEL (VIA /admin) ---
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ You are not authorized to use this command!")
+        await update.message.reply_text("❌ You are not authorized!")
         return
 
+    keyboard = [
+        [InlineKeyboardButton("➕ Grant Access to User", callback_data="admin_grant_prompt")],
+        [InlineKeyboardButton("📋 Subscriptions List", callback_data="admin_sub_list")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
+    ]
+    await update.message.reply_text(
+        "👑 <b>Admin Control Panel</b>\n\nNeeche diye gaye options me se select karein:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+async def show_subscriptions_list(query):
     data = load_data()
     subs = data.get("subscriptions", {})
     
-    text = "👑 <b>Admin Control Panel</b>\n\n<b>Active Users & Subscriptions:</b>\n"
     keyboard = []
+    text = "📋 <b>Active Subscriptions List:</b>\n\n"
     
     if not subs:
-        text += "<i>No active paid users found.</i>\n"
+        text += "<i>Koi bhi paid user abhi active nahi hai.</i>"
     else:
         for uid, info in subs.items():
             exp = datetime.fromisoformat(info["expires"])
             if datetime.now() < exp:
                 rem = exp - datetime.now()
                 time_rem = f"{rem.days}d {rem.seconds//3600}h"
-                text += f"• ID: <code>{uid}</code> | Time Left: <b>{time_rem}</b>\n"
-                keyboard.append([
-                    InlineKeyboardButton(f"❌ Remove {uid}", callback_data=f"admin_rem_{uid}"),
-                    InlineKeyboardButton(f"➕ Add 7 Days", callback_data=f"admin_add_{uid}")
-                ])
+                keyboard.append([InlineKeyboardButton(f"👤 {uid} ({time_rem} left)", callback_data=f"admin_manage_user_{uid}")])
 
-    keyboard.append([InlineKeyboardButton("➕ Grant Access to New User", callback_data="admin_grant_prompt")])
-    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")])
-
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    keyboard.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="back_to_admin")])
+    
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except:
+        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 # --- DELETE ACCOUNT MENU ---
 async def delete_account_menu(query, page=0):
@@ -452,6 +462,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"🗑 Account {acc['phone']} successfully remove kar diya gaya.")
             await delete_account_menu(query, page=0)
 
+    # --- ADMIN CALLBACKS ---
     elif data == "admin_grant_prompt":
         if query.from_user.id != ADMIN_USER_ID:
             return
@@ -462,6 +473,65 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
+    elif data == "admin_sub_list":
+        if query.from_user.id != ADMIN_USER_ID:
+            return
+        await show_subscriptions_list(query)
+
+    elif data == "back_to_admin":
+        if query.from_user.id != ADMIN_USER_ID:
+            return
+        keyboard = [
+            [InlineKeyboardButton("➕ Grant Access to User", callback_data="admin_grant_prompt")],
+            [InlineKeyboardButton("📋 Subscriptions List", callback_data="admin_sub_list")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
+        ]
+        await query.message.edit_text(
+            "👑 <b>Admin Control Panel</b>\n\nNeeche diye gaye options me se select karein:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+
+    elif data.startswith("admin_manage_user_"):
+        if query.from_user.id != ADMIN_USER_ID:
+            return
+        uid = data.split("_")[3]
+        data_json = load_data()
+        subs = data_json.get("subscriptions", {})
+        if uid in subs:
+            exp_str = subs[uid]["expires"]
+            exp_dt = datetime.fromisoformat(exp_str)
+            rem = exp_dt - datetime.now()
+            time_rem = f"{rem.days} days, {rem.seconds//3600} hours" if rem.days >= 0 else "Expired"
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Add 7 Days", callback_data=f"admin_add7_{uid}")],
+                [InlineKeyboardButton("➕ Add 30 Days", callback_data=f"admin_add30_{uid}")],
+                [InlineKeyboardButton("❌ Remove Access", callback_data=f"admin_rem_{uid}")],
+                [InlineKeyboardButton("🔙 Back to List", callback_data="admin_sub_list")]
+            ]
+            await query.message.edit_text(
+                f"👤 <b>Manage User:</b> <code>{uid}</code>\n⏳ <b>Time Left:</b> {time_rem}\n\nKya karna chahte hain?",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+
+    elif data.startswith("admin_add7_") or data.startswith("admin_add30_"):
+        if query.from_user.id != ADMIN_USER_ID:
+            return
+        parts = data.split("_")
+        days_to_add = 7 if "7" in parts[1] else 30
+        uid = parts[2]
+        
+        data_json = load_data()
+        if uid in data_json["subscriptions"]:
+            cur_exp = datetime.fromisoformat(data_json["subscriptions"][uid]["expires"])
+            new_exp = max(datetime.now(), cur_exp) + timedelta(days=days_to_add)
+            data_json["subscriptions"][uid]["expires"] = new_exp.isoformat()
+            save_data(data_json)
+            await query.answer(f"✅ Successfully added {days_to_add} days!", show_alert=True)
+            await show_subscriptions_list(query)
+
     elif data.startswith("admin_rem_"):
         if query.from_user.id != ADMIN_USER_ID:
             return
@@ -470,19 +540,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uid in data_json["subscriptions"]:
             del data_json["subscriptions"][uid]
             save_data(data_json)
-            await query.message.reply_text(f"✅ User <code>{uid}</code> ka access hata diya gaya hai.", parse_mode="HTML")
-
-    elif data.startswith("admin_add_"):
-        if query.from_user.id != ADMIN_USER_ID:
-            return
-        uid = data.split("_")[2]
-        data_json = load_data()
-        if uid in data_json["subscriptions"]:
-            cur_exp = datetime.fromisoformat(data_json["subscriptions"][uid]["expires"])
-            new_exp = max(datetime.now(), cur_exp) + timedelta(days=7)
-            data_json["subscriptions"][uid]["expires"] = new_exp.isoformat()
-            save_data(data_json)
-            await query.message.reply_text(f"✅ User <code>{uid}</code> me 7 days aur add kar diye gaye hain.", parse_mode="HTML")
+            await query.answer("✅ Access removed!", show_alert=True)
+            await show_subscriptions_list(query)
 
     elif data == "back_home":
         await start(update, context)
@@ -654,9 +713,9 @@ async def post_init(application):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_command))  # Admin command handler
+    app.add_handler(CommandHandler("admin", admin_command))  # Interactive Admin panel command
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Master Paid Bot with /admin is running...")
+    print("Master Paid Bot with Button Admin Panel is running...")
     app.run_polling()
