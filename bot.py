@@ -187,17 +187,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ <b>Speed:</b> {speed_str} | 🔄 <b>Cycle:</b> {cycle_str}"
     )
 
-    # EXACT BUTTON LAYOUT REQUESTED
+    # EXACT BUTTON LAYOUT: Start/Stop ek line me, Settings niche, Session & Phone upar-neeche, Delete account aakhiri me
     keyboard = [
         [
             InlineKeyboardButton("▶️ Start All", callback_data="start_all"),
             InlineKeyboardButton("⏹ Stop All", callback_data="stop_all")
         ],
         [
-            InlineKeyboardButton("⚙️ Settings Menu", callback_data="settings_menu")
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings_menu")
         ],
         [
-            InlineKeyboardButton("🔑 Session Login", callback_data="login_session"),
+            InlineKeyboardButton("🔑 Session Login", callback_data="login_session")
+        ],
+        [
             InlineKeyboardButton("📱 Phone Login", callback_data="login_phone")
         ],
         [
@@ -215,7 +217,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
-# --- SETTINGS MENU (SEPARATED SPEED & CYCLE) ---
+# --- SETTINGS MENU ---
 async def settings_menu(query):
     keyboard = [
         [InlineKeyboardButton("📝 Set Broadcast Messages", callback_data="set_broadcast_msg")],
@@ -227,12 +229,12 @@ async def settings_menu(query):
     markup = InlineKeyboardMarkup(keyboard)
     try:
         await query.message.edit_text(
-            "⚙️ <b>Settings Menu</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers alag-alag configure kar sakte hain:",
+            "⚙️ <b>Settings</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers configure kar sakte hain:",
             reply_markup=markup, parse_mode="HTML"
         )
     except:
         await query.message.reply_text(
-            "⚙️ <b>Settings Menu</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers alag-alag configure kar sakte hain:",
+            "⚙️ <b>Settings</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers configure kar sakte hain:",
             reply_markup=markup, parse_mode="HTML"
         )
 
