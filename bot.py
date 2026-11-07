@@ -7,30 +7,27 @@ import qrcode
 import io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.account import UpdateStatusRequest
 from telethon.tl.functions.users import GetFullUserRequest
 
-# --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 
-# Session directory setup
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
 
-# Messages storage file
 MESSAGES_FILE = "messages_data.json"
 USER_ACCOUNTS = []
 IS_RUNNING = False
+TOTAL_MESSAGES_SENT = 0
 
 logging.basicConfig(level=logging.INFO)
 LOGIN_DATA = {}
 
-# --- JSON PERSISTENCE FUNCTIONS FOR MESSAGES & TIMERS ---
 def load_persisted_data():
     if not os.path.exists(MESSAGES_FILE):
         return {}
@@ -47,7 +44,8 @@ def save_persisted_data():
         data[acc['phone']] = {
             'messages': acc['messages'],
             'group_delay': acc.get('group_delay', 2),
-            'resend_interval': acc.get('resend_interval', 60)
+            'resend_interval': acc.get('resend_interval', 60),
+            'auto_reply': acc.get('auto_reply', '')
         }
     try:
         with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
@@ -55,7 +53,6 @@ def save_persisted_data():
     except Exception as e:
         print(f"Error saving messages file: {e}")
 
-# --- KEEP ALIVE BACKGROUND TASK ---
 async def keep_client_alive(client):
     while True:
         try:
@@ -66,7 +63,17 @@ async def keep_client_alive(client):
             print(f"Ping Error: {e}")
         await asyncio.sleep(20)
 
-# --- AUTO-LOAD EXISTING SESSIONS & SAVED DATA ON STARTUP ---
+# --- DM AUTO-RESPONDER HANDLER FOR TELETHON CLIENTS ---
+def setup_dm_handler(client, acc):
+    @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
+    async def dm_auto_responder(event):
+        auto_reply_text = acc.get('auto_reply', '')
+        if auto_reply_text:
+            try:
+                await event.reply(auto_reply_text)
+            except Exception as e:
+                print(f"DM Reply Error for {acc['phone']}: {e}")
+
 async def load_saved_sessions():
     global USER_ACCOUNTS
     if not os.path.exists(SESSION_DIR):
@@ -92,28 +99,31 @@ async def load_saved_sessions():
                         acc_messages = acc_info.get('messages', [])
                         group_delay = acc_info.get('group_delay', 2)
                         resend_interval = acc_info.get('resend_interval', 60)
+                        auto_reply = acc_info.get('auto_reply', '')
 
-                        USER_ACCOUNTS.append({
+                        acc_dict = {
                             'phone': phone,
                             'client': client,
                             'active': True,
                             'messages': acc_messages,
                             'group_delay': group_delay,
-                            'resend_interval': resend_interval
-                        })
-                        print(f"Successfully reloaded persistent session and data for: {phone} ({len(acc_messages)} msgs)")
+                            'resend_interval': resend_interval,
+                            'auto_reply': auto_reply
+                        }
+                        setup_dm_handler(client, acc_dict)
+                        USER_ACCOUNTS.append(acc_dict)
+                        print(f"Successfully loaded session: {phone}")
                 else:
                     await client.disconnect()
             except Exception as e:
                 print(f"Failed to load session {filename}: {e}")
 
-# --- HELPER: MANAGE MENU UI WITH PAGINATION ---
 async def show_manage_menu(query, page=0):
     if not USER_ACCOUNTS:
         await query.message.reply_text("❌ Koi bhi account login nahi hai!")
         return
 
-    per_page = 5  
+    per_page = 4  
     total_accounts = len(USER_ACCOUNTS)
     total_pages = (total_accounts + per_page - 1) // per_page
     if total_pages == 0: 
@@ -135,7 +145,8 @@ async def show_manage_menu(query, page=0):
         ])
         keyboard.append([
             InlineKeyboardButton("📝 Msg", callback_data=f"set_acc_msg_{index}"),
-            InlineKeyboardButton(f"⚙️ Timers (G:{acc.get('group_delay', 2)}s, R:{acc.get('resend_interval', 60)}s)", callback_data=f"set_acc_timers_{index}"),
+            InlineKeyboardButton(f"⚙️ Timers", callback_data=f"set_acc_timers_{index}"),
+            InlineKeyboardButton("🤖 DM Reply", callback_data=f"set_dm_reply_{index}"),
             InlineKeyboardButton("🗑 Delete", callback_data=f"delete_acc_{index}")
         ])
      
@@ -154,26 +165,28 @@ async def show_manage_menu(query, page=0):
     markup = InlineKeyboardMarkup(keyboard)
     try:
         await query.message.edit_text(
-            f"📱 <b>Manage Accounts, Messages & Personal Timers (Page {page + 1}/{total_pages}):</b>\n"
-            "• <b>📝 Msg:</b> Us number ke bulk messages set karein.\n"
-            "• <b>⚙️ Timers:</b> Group delay aur Resend interval set karein.\n"
-            "• <b>ON/OFF:</b> Status toggle karne ke liye upar wale button par click karein:", 
+            f"📱 <b>Manage Accounts & Settings (Page {page + 1}/{total_pages}):</b>\n"
+            "• <b>📝 Msg:</b> Bulk broadcast messages set karein.\n"
+            "• <b>⚙️ Timers:</b> Group delay & Resend interval set karein.\n"
+            "• <b>🤖 DM Reply:</b> Koi personal message kare toh automatic kya reply jaye.", 
             reply_markup=markup, parse_mode="HTML"
         )
     except Exception:
         pass
 
-# --- TELEGRAM BOT MENU ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_str = "▶️ RUNNING" if IS_RUNNING else "⏹ STOPPED"
     active_count = sum(1 for acc in USER_ACCOUNTS if acc['active'])
     total_messages = sum(len(acc['messages']) for acc in USER_ACCOUNTS)
 
     text = (
-        "🤖 <b>Multi-Account Personal Bulk Broadcast Bot</b>\n\n"
+        "✨ <b>Master Control Bot</b> ✨\n"
+        "👤 <b>User Panel</b>\n"
         f"📊 <b>Status:</b> {status_str}\n"
-        f"👤 <b>Total Accounts:</b> {len(USER_ACCOUNTS)} (Active: {active_count})\n"
-        f"💬 <b>Total Saved Messages across all accounts:</b> {total_messages}"
+        f"💬 <b>Total Saved Messages:</b> {total_messages}\n"
+        f"📈 <b>Accounts:</b> {len(USER_ACCOUNTS)} (Running: {active_count})\n"
+        f"📨 <b>Messages Sent:</b> {TOTAL_MESSAGES_SENT}\n"
+        f"⚡ <b>Speed & Cycle:</b> Custom per account"
     )
 
     keyboard = [
@@ -182,11 +195,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("⏹ Stop All", callback_data="stop_all")
         ],
         [
-            InlineKeyboardButton("🔑 Phone Login", callback_data="login_phone"),
-            InlineKeyboardButton("📱 QR Login", callback_data="login_qr")
+            InlineKeyboardButton("📱 Manage Accounts & Settings", callback_data="manage_accounts")
         ],
         [
-            InlineKeyboardButton("📱 Manage Accounts & Msgs", callback_data="manage_accounts")
+            InlineKeyboardButton("🔑 Session Login", callback_data="login_session"),
+            InlineKeyboardButton("📱 Phone Login", callback_data="login_phone")
+        ],
+        [
+            InlineKeyboardButton("🗑 Delete Account", callback_data="manage_accounts")
         ]
     ]
 
@@ -200,8 +216,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
-# --- CONCURRENT PARALLEL BROADCAST ---
 async def broadcast_for_account(acc):
+    global TOTAL_MESSAGES_SENT
     client = acc['client']
     while IS_RUNNING:
         account_messages = acc['messages']
@@ -224,6 +240,7 @@ async def broadcast_for_account(acc):
                     try:
                         random_msg = random.choice(account_messages)
                         await client.send_message(dialog.id, random_msg)
+                        TOTAL_MESSAGES_SENT += 1
                         await asyncio.sleep(group_delay)
                     except Exception as e:
                         print(f"Send Error for {acc['phone']}: {e}")
@@ -242,7 +259,6 @@ async def run_broadcast_loop():
             continue
         await asyncio.gather(*(broadcast_for_account(acc) for acc in active_clients))
 
-# --- BUTTON CLICK HANDLERS ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING
     query = update.callback_query
@@ -278,9 +294,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['state'] = 'WAITING_PHONE'
         await query.message.reply_text("📱 Apna Phone Number country code ke sath bhejayein (jaise +919876543210):")
 
-    elif data == "login_qr":
-        await query.message.reply_text("🔄 Naya QR Code generate ho raha hai, kripya intezaار karein...")
-        asyncio.create_task(process_qr_login(query, context))
+    elif data == "login_session":
+        if context.user_data is not None:
+            context.user_data['state'] = 'WAITING_STRING_SESSION'
+        await query.message.reply_text("🔑 Apni Telethon String Session yahan bhejayein:")
 
     elif data == "manage_accounts":
         await show_manage_menu(query, page=0)
@@ -295,7 +312,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(data.split("_")[2])
         if idx < len(USER_ACCOUNTS):
             USER_ACCOUNTS[idx]['active'] = not USER_ACCOUNTS[idx]['active']
-        per_page = 5
+        per_page = 4
         current_page = idx // per_page
         await show_manage_menu(query, page=current_page)
         return
@@ -308,8 +325,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['target_acc_index'] = idx
             acc_phone = USER_ACCOUNTS[idx]['phone']
             await query.message.reply_text(
-                f"📝 Account <b>{acc_phone}</b> ke liye apne bulk messages bhejayein.\n"
-                "• Har nayi line ek naya message ban jayega:",
+                f"📝 Account <b>{acc_phone}</b> ke liye bulk messages bhejayein (Har line ek naya message):",
                 parse_mode="HTML"
             )
         return
@@ -328,6 +344,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    elif data.startswith("set_dm_reply_"):
+        idx = int(data.split("_")[3])
+        if idx < len(USER_ACCOUNTS):
+            if context.user_data is not None:
+                context.user_data['state'] = 'WAITING_DM_REPLY'
+                context.user_data['target_acc_index'] = idx
+            acc_phone = USER_ACCOUNTS[idx]['phone']
+            await query.message.reply_text(
+                f"🤖 Account <b>{acc_phone}</b> ke liye Auto DM Reply text bhejayein:",
+                parse_mode="HTML"
+            )
+        return
+
     elif data.startswith("delete_acc_"):
         idx = int(data.split("_")[2])
         if idx < len(USER_ACCOUNTS):
@@ -342,8 +371,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  
             removed = USER_ACCOUNTS.pop(idx)
             save_persisted_data()
-            await query.message.reply_text(f"🗑 Account {removed['phone']} remove aur logout kar diya gaya.")
-        per_page = 5
+            await query.message.reply_text(f"🗑 Account {removed['phone']} remove kar diya gaya.")
+        per_page = 4
         current_page = idx // per_page
         if current_page * per_page >= len(USER_ACCOUNTS) and current_page > 0:
             current_page -= 1
@@ -357,72 +386,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await start(update, context)
 
-# --- BULLET-PROOF QR LOGIN PROCESSOR ---
-async def process_qr_login(query, context):
-    user_id = query.from_user.id
-    unique_id = int(asyncio.get_event_loop().time())
-    session_path = os.path.join(SESSION_DIR, f"qr_acc_{user_id}_{unique_id}")
-    
-    client = TelegramClient(session_path, API_ID, API_HASH)
-    try:
-        if client.is_connected():
-            await client.disconnect()
-             
-        await client.connect()
-        qr = await client.qr_login()
-         
-        img = qrcode.make(qr.url)
-        bio = io.BytesIO()
-        bio.name = 'qr.png'
-        img.save(bio, 'PNG')
-        bio.seek(0)
-         
-        await query.message.reply_photo(
-            photo=bio,
-            caption="📱 <b>Telegram App se naya QR Code Scan Karein!</b>\n"
-                    "Settings > Devices > Link Desktop Device par jaakar yeh QR scan karein.\n"
-                    "<i>(2 minute ke liye valid hai)</i>",
-            parse_mode="HTML"
-        )
-         
-        LOGIN_DATA[user_id] = {'client': client}
-         
-        try:
-            await qr.wait(timeout=120)
-            me = await client.get_me()
-            phone = f"+{me.phone}" if me and me.phone else f"QR_Account_{unique_id}"
-             
-            await client(UpdateStatusRequest(offline=False))
-            async def keep_client_alive_wrapper():
-                await keep_client_alive(client)
-            asyncio.create_task(keep_client_alive_wrapper())
-             
-            USER_ACCOUNTS.append({
-                'phone': phone, 
-                'client': client, 
-                'active': True, 
-                'messages': [], 
-                'group_delay': 2, 
-                'resend_interval': 60
-            })
-            save_persisted_data()
-            await query.message.reply_text(f"✅ Account <b>{phone}</b> successfully QR Login ho gaya aur session save ho gaya!", parse_mode="HTML")
-        except SessionPasswordNeededError:
-            if context.user_data is not None:
-                context.user_data['state'] = 'WAITING_QR_PASSWORD'
-                context.user_data['qr_user_id'] = user_id
-            await query.message.reply_text("🔒 Is account par 2-Step Verification (Password) laga hua hai. Kripya apna password bhejayein:")
-        except asyncio.TimeoutError:
-            await client.disconnect()
-            await query.message.reply_text("❌ QR Code scan karne ka time khatam ho gaya (Timeout). Dobara koshish karein.")
-    except Exception as e:
-        try:
-            await client.disconnect()
-        except:
-            pass
-        await query.message.reply_text(f"❌ QR Login Error: {e}")
-
-# --- TEXT MESSAGE HANDLER ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not context.user_data:
         return
@@ -433,15 +396,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == 'WAITING_PHONE':
         phone_num = user_text
         context.user_data['phone'] = phone_num
-        session_path = os.path.join(SESSION_DIR, f"phone_acc_{user_id}")
+        session_path = os.path.join(SESSION_DIR, f"phone_acc_{user_id}_{int(asyncio.get_event_loop().time())}")
         client = TelegramClient(session_path, API_ID, API_HASH)
         await client.connect()
         try:
             sent = await client.send_code_request(phone_num)
             context.user_data['phone_client'] = client
             context.user_data['phone_hash'] = sent.phone_code_hash
+            context.user_data['session_path'] = session_path
             context.user_data['state'] = 'WAITING_PHONE_CODE'
-            await update.message.reply_text("📨 Telegram par ek OTP code bheja gaya hai. Kripya woh code yahan bhejayein:")
+            await update.message.reply_text("📨 Telegram OTP code bhej diya gaya hai. Code yahan enter karein:")
         except Exception as e:
             await client.disconnect()
             await update.message.reply_text(f"❌ Error sending code: {e}")
@@ -459,20 +423,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await client(UpdateStatusRequest(offline=False))
             asyncio.create_task(keep_client_alive(client))
-            USER_ACCOUNTS.append({
+            
+            acc_dict = {
                 'phone': phone, 
                 'client': client, 
                 'active': True, 
                 'messages': [], 
                 'group_delay': 2, 
-                'resend_interval': 60
-            })
+                'resend_interval': 60,
+                'auto_reply': ''
+            }
+            setup_dm_handler(client, acc_dict)
+            USER_ACCOUNTS.append(acc_dict)
             save_persisted_data()
-            await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya aur session save ho gaya!", parse_mode="HTML")
+            await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya!", parse_mode="HTML")
             context.user_data['state'] = None
         except SessionPasswordNeededError:
             context.user_data['state'] = 'WAITING_PHONE_PASSWORD'
-            await update.message.reply_text("🔒 Is account par 2-Step Verification password laga hai. Password bhejayein:")
+            await update.message.reply_text("🔒 2-Step Verification password enter karein:")
         except Exception as e:
             await update.message.reply_text(f"❌ Sign in error: {e}")
             await client.disconnect()
@@ -489,20 +457,59 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await client(UpdateStatusRequest(offline=False))
             asyncio.create_task(keep_client_alive(client))
-            USER_ACCOUNTS.append({
+            
+            acc_dict = {
                 'phone': phone, 
                 'client': client, 
                 'active': True, 
                 'messages': [], 
                 'group_delay': 2, 
-                'resend_interval': 60
-            })
+                'resend_interval': 60,
+                'auto_reply': ''
+            }
+            setup_dm_handler(client, acc_dict)
+            USER_ACCOUNTS.append(acc_dict)
             save_persisted_data()
-            await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> successfully login ho gaya.", parse_mode="HTML")
+            await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
             context.user_data['state'] = None
         except Exception as e:
             await update.message.reply_text(f"❌ Password Error: {e}")
             await client.disconnect()
+            context.user_data['state'] = None
+
+    elif state == 'WAITING_STRING_SESSION':
+        string_session = user_text
+        session_path = os.path.join(SESSION_DIR, f"str_acc_{user_id}_{int(asyncio.get_event_loop().time())}")
+        client = TelegramClient(StringSession(string_session), API_ID, API_HASH)
+        try:
+            await client.connect()
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                phone = f"+{me.phone}" if me and me.phone else f"Session_{user_id}"
+                
+                # Save string session to file properly
+                with open(f"{session_path}.session", "w") as f:
+                    f.write(client.session.save())
+                
+                asyncio.create_task(keep_client_alive(client))
+                acc_dict = {
+                    'phone': phone, 
+                    'client': client, 
+                    'active': True, 
+                    'messages': [], 
+                    'group_delay': 2, 
+                    'resend_interval': 60,
+                    'auto_reply': ''
+                }
+                setup_dm_handler(client, acc_dict)
+                USER_ACCOUNTS.append(acc_dict)
+                save_persisted_data()
+                await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> successfully added!", parse_mode="HTML")
+            else:
+                await update.message.reply_text("❌ Invalid Session String!")
+            context.user_data['state'] = None
+        except Exception as e:
+            await update.message.reply_text(f"❌ Session Error: {e}")
             context.user_data['state'] = None
 
     elif state == 'WAITING_ACC_MSG':
@@ -517,7 +524,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['target_acc_index'] = None
                 await update.message.reply_text(
                     f"✅ Account {acc_phone} ke liye {len(lines)} messages add ho gaye!\n"
-                    f"Total saved messages for this account: {len(USER_ACCOUNTS[idx]['messages'])}"
+                    f"Total messages: {len(USER_ACCOUNTS[idx]['messages'])}"
                 )
 
     elif state == 'WAITING_ACC_TIMERS':
@@ -527,10 +534,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parts = user_text.split()
                 g_delay = int(parts[0])
                 r_interval = int(parts[1])
-                 
-                if g_delay < 1 or r_interval < 5:
-                    await update.message.reply_text("⚠️ Group delay minimum 1 sec aur resend interval minimum 5 sec hona chahiye.")
-                    return
                  
                 USER_ACCOUNTS[idx]['group_delay'] = g_delay
                 USER_ACCOUNTS[idx]['resend_interval'] = r_interval
@@ -548,41 +551,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 await update.message.reply_text("❌ Sahi format me value dalein. Example: <code>3 60</code>", parse_mode="HTML")
 
-    elif state == 'WAITING_QR_PASSWORD':
-        password = user_text
-        data = LOGIN_DATA.get(user_id)
-        if not data:
-            await update.message.reply_text("❌ Session expired. Dobara QR login try karein.")
-            context.user_data['state'] = None
-            return
-        client = data['client']
-        try:
-            await client.sign_in(password=password)
-            me = await client.get_me()
-            phone = f"+{me.phone}" if me and me.phone else "QR_Account"
-             
-            await client(UpdateStatusRequest(offline=False))
-            asyncio.create_task(keep_client_alive(client))
-            USER_ACCOUNTS.append({
-                'phone': phone, 
-                'client': client, 
-                'active': True, 
-                'messages': [], 
-                'group_delay': 2, 
-                'resend_interval': 60
-            })
+    elif state == 'WAITING_DM_REPLY':
+        idx = context.user_data.get('target_acc_index')
+        if idx is not None and idx < len(USER_ACCOUNTS):
+            USER_ACCOUNTS[idx]['auto_reply'] = user_text
             save_persisted_data()
-            await update.message.reply_text(f"✅ 2-Step Password verified! Account <b>{phone}</b> successfully QR Login ho gaya aur session save ho gaya!", parse_mode="HTML")
+            acc_phone = USER_ACCOUNTS[idx]['phone']
             context.user_data['state'] = None
-        except Exception as e:
-            await update.message.reply_text(f"❌ Password Error: {e}")
-            await client.disconnect()
-            context.user_data['state'] = None
+            context.user_data['target_acc_index'] = None
+            await update.message.reply_text(
+                f"✅ Account {acc_phone} ka DM Auto-Reply set ho gaya:\n<code>{user_text}</code>",
+                parse_mode="HTML"
+            )
 
 async def post_init(application):
-    print("Loading persistent sessions and messages from disk...")
+    print("Loading sessions and data...")
     await load_saved_sessions()
-    print(f"Total active persisted accounts loaded: {len(USER_ACCOUNTS)}")
+    print(f"Total accounts loaded: {len(USER_ACCOUNTS)}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
@@ -590,5 +575,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Robust Multi-Account Bot is running...")
+    print("Advanced Bot is running...")
     app.run_polling()
