@@ -6,6 +6,8 @@ import json
 import qrcode
 import io
 from datetime import datetime, timedelta
+from flask import Flask
+from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telethon import TelegramClient, events
@@ -30,6 +32,17 @@ TOTAL_MESSAGES_SENT = 0
 
 logging.basicConfig(level=logging.INFO)
 LOGIN_DATA = {}
+
+# --- FLASK WEB SERVER FOR RENDER HEALTH CHECK ---
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "Bot is alive and running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -711,11 +724,16 @@ async def post_init(application):
     print(f"Loaded {len(USER_ACCOUNTS)} accounts.")
 
 if __name__ == '__main__':
+    # Start Flask server in background thread to prevent Render timeout error
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_command))  # Interactive Admin panel command
+    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Master Paid Bot with Button Admin Panel is running...")
+    print("Master Paid Bot with Flask & Admin Panel is running...")
     app.run_polling()
