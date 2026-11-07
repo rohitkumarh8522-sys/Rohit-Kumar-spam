@@ -18,8 +18,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 
-# --- APKE APNE TELEGRAM USER ID YAHAN DAALEIN (ADMIN) ---
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789")) # Yahan apni Telegram ID dalein
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789")) # Apni Telegram ID yahan dalein
 
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -32,7 +31,6 @@ TOTAL_MESSAGES_SENT = 0
 logging.basicConfig(level=logging.INFO)
 LOGIN_DATA = {}
 
-# --- PERSISTENT STORAGE (USERS, SUBSCRIPTIONS & MESSAGES) ---
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {"subscriptions": {}, "accounts_data": {}}
@@ -50,13 +48,12 @@ def save_data(data):
     except Exception as e:
         print(f"Error saving data: {e}")
 
-def get_user_subscription(user_id, username=""):
+def get_user_subscription(user_id):
     data = load_data()
     subs = data.get("subscriptions", {})
     
-    # Admin has lifetime unlimited access
     if user_id == ADMIN_USER_ID:
-        return {"active": True, "expires": "Lifetime"}
+        return {"active": True, "expires": "Lifetime", "raw_expiry": None}
         
     str_id = str(user_id)
     if str_id in subs:
@@ -68,10 +65,10 @@ def get_user_subscription(user_id, username=""):
             hours = remaining.seconds // 3600
             minutes = (remaining.seconds % 3600) // 60
             time_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
-            return {"active": True, "expires": time_str}
+            return {"active": True, "expires": time_str, "raw_expiry": expiry_time}
         else:
-            return {"active": False, "expires": "Expired"}
-    return {"active": False, "expires": "No Access"}
+            return {"active": False, "expires": "Expired", "raw_expiry": expiry_time}
+    return {"active": False, "expires": "No Access", "raw_expiry": None}
 
 async def check_access(update: Update):
     user = update.effective_user
@@ -81,7 +78,7 @@ async def check_access(update: Update):
     if user.id == ADMIN_USER_ID:
         return True
         
-    sub = get_user_subscription(user.id, user.username)
+    sub = get_user_subscription(user.id)
     if not sub["active"]:
         await update.effective_message.reply_text(
             "❌ <b>Your time is up!</b>\n\n"
@@ -163,20 +160,19 @@ def save_account_meta_to_disk():
     data["accounts_data"] = acc_data
     save_data(data)
 
-# --- MENUS & INTERFACES ---
+# --- MAIN MENU INTERFACE ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not await check_access(update):
         return
 
-    sub = get_user_subscription(user.id, user.username)
+    sub = get_user_subscription(user.id)
     time_left = sub["expires"]
     
     status_str = "▶️ RUNNING" if IS_RUNNING else "⏹ STOPPED"
     active_count = sum(1 for acc in USER_ACCOUNTS if acc['active'])
     
-    # Get first account's timer configs for display if available
-    speed_str = "2-5s"
+    speed_str = "2s"
     cycle_str = "60s"
     if USER_ACCOUNTS:
         speed_str = f"{USER_ACCOUNTS[0].get('group_delay', 2)}s"
@@ -191,13 +187,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ <b>Speed:</b> {speed_str} | 🔄 <b>Cycle:</b> {cycle_str}"
     )
 
+    # EXACT BUTTON LAYOUT REQUESTED
     keyboard = [
         [
             InlineKeyboardButton("▶️ Start All", callback_data="start_all"),
             InlineKeyboardButton("⏹ Stop All", callback_data="stop_all")
         ],
         [
-            InlineKeyboardButton("⚙️ Settings", callback_data="settings_menu")
+            InlineKeyboardButton("⚙️ Settings Menu", callback_data="settings_menu")
         ],
         [
             InlineKeyboardButton("🔑 Session Login", callback_data="login_session"),
@@ -207,9 +204,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🗑 Delete Account", callback_data="delete_account_menu")
         ]
     ]
-
-    if user.id == ADMIN_USER_ID:
-        keyboard.append([InlineKeyboardButton("👑 Admin Panel (Add Access)", callback_data="admin_panel")])
 
     markup = InlineKeyboardMarkup(keyboard)
      
@@ -221,25 +215,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
+# --- SETTINGS MENU (SEPARATED SPEED & CYCLE) ---
 async def settings_menu(query):
     keyboard = [
         [InlineKeyboardButton("📝 Set Broadcast Messages", callback_data="set_broadcast_msg")],
         [InlineKeyboardButton("🤖 Set DM Auto-Reply", callback_data="set_dm_msg")],
-        [InlineKeyboardButton("⏱ Set Cycle & Speed Timers", callback_data="set_timers_menu")],
+        [InlineKeyboardButton("⚡ Set Speed (Group Delay)", callback_data="set_speed_timer")],
+        [InlineKeyboardButton("🔄 Set Cycle Interval", callback_data="set_cycle_timer")],
         [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
-    await query.message.edit_text(
-        "⚙️ <b>Settings Menu</b>\n\nYahan se aap broadcast messages, DM auto-reply aur timers configure kar sakte hain:",
-        reply_markup=markup, parse_mode="HTML"
-    )
+    try:
+        await query.message.edit_text(
+            "⚙️ <b>Settings Menu</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers alag-alag configure kar sakte hain:",
+            reply_markup=markup, parse_mode="HTML"
+        )
+    except:
+        await query.message.reply_text(
+            "⚙️ <b>Settings Menu</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers alag-alag configure kar sakte hain:",
+            reply_markup=markup, parse_mode="HTML"
+        )
 
+# --- ADMIN COMMAND & PANEL ---
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command!")
+        return
+
+    data = load_data()
+    subs = data.get("subscriptions", {})
+    
+    text = "👑 <b>Admin Control Panel</b>\n\n<b>Active Users & Subscriptions:</b>\n"
+    keyboard = []
+    
+    if not subs:
+        text += "<i>No active paid users found.</i>\n"
+    else:
+        for uid, info in subs.items():
+            exp = datetime.fromisoformat(info["expires"])
+            if datetime.now() < exp:
+                rem = exp - datetime.now()
+                time_rem = f"{rem.days}d {rem.seconds//3600}h"
+                text += f"• ID: <code>{uid}</code> | Time Left: <b>{time_rem}</b>\n"
+                keyboard.append([
+                    InlineKeyboardButton(f"❌ Remove {uid}", callback_data=f"admin_rem_{uid}"),
+                    InlineKeyboardButton(f"➕ Add 7 Days", callback_data=f"admin_add_{uid}")
+                ])
+
+    keyboard.append([InlineKeyboardButton("➕ Grant Access to New User", callback_data="admin_grant_prompt")])
+    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")])
+
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+# --- DELETE ACCOUNT MENU ---
 async def delete_account_menu(query, page=0):
     if not USER_ACCOUNTS:
-        await query.message.edit_text(
-            "❌ Koi bhi account login nahi hai!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_home")]])
-        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]])
+        try:
+            await query.message.edit_text("❌ Koi bhi account login nahi hai!", reply_markup=markup)
+        except:
+            await query.message.reply_text("❌ Koi bhi account login nahi hai!", reply_markup=markup)
         return
 
     per_page = 5
@@ -262,10 +298,18 @@ async def delete_account_menu(query, page=0):
         keyboard.append(nav)
 
     keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")])
-    await query.message.edit_text(
-        "🗑 <b>Delete Account Management</b>\nJis account ko remove karna ho us par click karein:",
-        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
-    )
+    
+    markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.message.edit_text(
+            "🗑 <b>Delete Account Management</b>\nJis account ko remove karna ho us par click karein:",
+            reply_markup=markup, parse_mode="HTML"
+        )
+    except:
+        await query.message.reply_text(
+            "🗑 <b>Delete Account Management</b>\nJis account ko remove karna ho us par click karein:",
+            reply_markup=markup, parse_mode="HTML"
+        )
 
 # --- BROADCAST LOOP ---
 async def broadcast_for_account(acc):
@@ -360,12 +404,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'WAITING_GLOBAL_DM'
         await query.message.reply_text("🤖 Sabhi accounts ke liye **DM Auto-Reply** message bhejayein:", parse_mode="HTML")
 
-    elif data == "set_timers_menu":
-        context.user_data['state'] = 'WAITING_TIMERS'
+    elif data == "set_speed_timer":
+        context.user_data['state'] = 'WAITING_SPEED'
         await query.message.reply_text(
-            "⏱ **Timers Set Karein**\n"
-            "Format bhejayein: <code>[Group Delay (secs)] [Cycle Interval (secs)]</code>\n"
-            "Example: <code>3 60</code> (Matlab har message me 3 sec gap, aur pura cycle 60 sec baad repeat)",
+            "⚡ **Speed (Group Delay) Set Karein**\n"
+            "Seconds me value bhejayein (e.g., <code>3</code> matlab har message ke beech 3 seconds ka gap):",
+            parse_mode="HTML"
+        )
+
+    elif data == "set_cycle_timer":
+        context.user_data['state'] = 'WAITING_CYCLE'
+        await query.message.reply_text(
+            "🔄 **Cycle Interval Set Karein**\n"
+            "Seconds me value bhejayein (e.g., <code>60</code> matlab har 60 seconds baad pura cycle repeat hoga):",
             parse_mode="HTML"
         )
 
@@ -399,23 +450,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"🗑 Account {acc['phone']} successfully remove kar diya gaya.")
             await delete_account_menu(query, page=0)
 
-    elif data == "admin_panel":
+    elif data == "admin_grant_prompt":
         if query.from_user.id != ADMIN_USER_ID:
-            await query.answer("❌ You are not admin!", show_alert=True)
             return
         context.user_data['state'] = 'WAITING_ADMIN_GRANT'
         await query.message.reply_text(
-            "👑 **Admin Access Manager**\n\n"
-            "User ko access dene ke liye is format me bhejayein:\n"
-            "<code>[Telegram Username/ID] [Days]</code>\n"
-            "Example: <code>@username 30</code> (30 days access)",
+            "👑 **Grant Access**\nUser ki Telegram Numeric ID aur Days bhejayein:\n"
+            "Format: <code>[User_ID] [Days]</code> (e.g. <code>123456789 30</code>)",
             parse_mode="HTML"
         )
+
+    elif data.startswith("admin_rem_"):
+        if query.from_user.id != ADMIN_USER_ID:
+            return
+        uid = data.split("_")[2]
+        data_json = load_data()
+        if uid in data_json["subscriptions"]:
+            del data_json["subscriptions"][uid]
+            save_data(data_json)
+            await query.message.reply_text(f"✅ User <code>{uid}</code> ka access hata diya gaya hai.", parse_mode="HTML")
+
+    elif data.startswith("admin_add_"):
+        if query.from_user.id != ADMIN_USER_ID:
+            return
+        uid = data.split("_")[2]
+        data_json = load_data()
+        if uid in data_json["subscriptions"]:
+            cur_exp = datetime.fromisoformat(data_json["subscriptions"][uid]["expires"])
+            new_exp = max(datetime.now(), cur_exp) + timedelta(days=7)
+            data_json["subscriptions"][uid]["expires"] = new_exp.isoformat()
+            save_data(data_json)
+            await query.message.reply_text(f"✅ User <code>{uid}</code> me 7 days aur add kar diye gaye hain.", parse_mode="HTML")
 
     elif data == "back_home":
         await start(update, context)
 
-# --- TEXT HANDLER & ADMIN LOGIC ---
+# --- TEXT HANDLER ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not context.user_data:
         return
@@ -430,18 +500,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == 'WAITING_ADMIN_GRANT' and user.id == ADMIN_USER_ID:
         try:
             parts = user_text.split()
-            target = parts[0].replace("@", "")
+            target_id = parts[0]
             days = int(parts[1])
             
             data = load_data()
             expiry = datetime.now() + timedelta(days=days)
-            data["subscriptions"][target] = {"expires": expiry.isoformat()}
+            data["subscriptions"][target_id] = {"expires": expiry.isoformat()}
             save_data(data)
             
             context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Success! User <code>{target}</code> ko {days} din ka bot access de diya gaya hai.", parse_mode="HTML")
+            await update.message.reply_text(f"✅ Success! User ID <code>{target_id}</code> ko {days} din ka access de diya gaya hai.", parse_mode="HTML")
         except Exception as e:
-            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>username 30</code>", parse_mode="HTML")
+            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>123456789 30</code>", parse_mode="HTML")
         return
 
     if state == 'WAITING_PHONE':
@@ -552,20 +622,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = None
         await update.message.reply_text(f"✅ Sabhi accounts ke liye DM Auto-Reply set ho gaya:\n<code>{user_text}</code>", parse_mode="HTML")
 
-    elif state == 'WAITING_TIMERS':
+    elif state == 'WAITING_SPEED':
         try:
-            parts = user_text.split()
-            g_delay = int(parts[0])
-            r_interval = int(parts[1])
+            val = int(user_text)
             for acc in USER_ACCOUNTS:
-                acc['group_delay'] = g_delay
-                acc.get['resend_interval'] = r_interval if 'resend_interval' in acc else 60 # safe fallback
-                acc['resend_interval'] = r_interval
+                acc['group_delay'] = val
             save_account_meta_to_disk()
             context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Timers updated successfully!\n• Group Delay: {g_delay}s\n• Cycle Interval: {r_interval}s")
+            await update.message.reply_text(f"✅ Speed (Group Delay) successfully updated to <b>{val}s</b>!", parse_mode="HTML")
         except:
-            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>3 60</code>", parse_mode="HTML")
+            await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 3)")
+
+    elif state == 'WAITING_CYCLE':
+        try:
+            val = int(user_text)
+            for acc in USER_ACCOUNTS:
+                acc['resend_interval'] = val
+            save_account_meta_to_disk()
+            context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Cycle Interval successfully updated to <b>{val}s</b>!", parse_mode="HTML")
+        except:
+            await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 60)")
 
 async def post_init(application):
     print("Loading sessions...")
@@ -575,8 +652,9 @@ async def post_init(application):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_command))  # Admin command handler
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Paid Master Bot is running...")
+    print("Master Paid Bot with /admin is running...")
     app.run_polling()
