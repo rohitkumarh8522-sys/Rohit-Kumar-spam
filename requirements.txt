@@ -3,3 +3,4 @@ telethon
 tgcrypto
 qrcode
 pillow
+flask
