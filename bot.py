@@ -3,8 +3,6 @@ import logging
 import os
 import random
 import json
-import qrcode
-import io
 from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
@@ -30,7 +28,6 @@ DATA_FILE = "bot_data.json"
 USER_RUNTIMES = {}
 
 logging.basicConfig(level=logging.INFO)
-LOGIN_DATA = {}
 
 # --- FLASK WEB SERVER FOR RENDER HEALTH CHECK ---
 flask_app = Flask(__name__)
@@ -105,19 +102,18 @@ async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     sub = get_user_subscription(user.id)
     if not sub["active"]:
-        # Show Pricing Shop Menu
         keyboard = [
-            [InlineKeyboardButton("💎 7 Days Plan (₹X) - 2 Accounts", callback_data="buy_plan_7")],
-            [InlineKeyboardButton("💎 15 Days Plan (₹X) - 3 Accounts", callback_data="buy_plan_15")],
-            [InlineKeyboardButton("💎 30 Days Plan (₹X) - 5 Accounts", callback_data="buy_plan_30")],
-            [InlineKeyboardButton("💎 50 Days Plan (₹X) - 8 Accounts", callback_data="buy_plan_50")],
-            [InlineKeyboardButton("💎 90 Days Plan (₹X) - Unlimited", callback_data="buy_plan_90")],
-            [InlineKeyboardButton("🔄 Check Payment Status", callback_data="check_status")]
+            [InlineKeyboardButton("💎 7 Days | ₹99 | 2 Accounts", callback_data="buy_plan_7")],
+            [InlineKeyboardButton("💎 15 Days | ₹179 | 3 Accounts", callback_data="buy_plan_15")],
+            [InlineKeyboardButton("💎 30 Days | ₹299 | 5 Accounts", callback_data="buy_plan_30")],
+            [InlineKeyboardButton("💎 50 Days | ₹449 | 8 Accounts", callback_data="buy_plan_50")],
+            [InlineKeyboardButton("💎 90 Days | ₹799 | Unlimited Accounts", callback_data="buy_plan_90")],
+            [InlineKeyboardButton("🔄 Check Payment Approval Status", callback_data="check_status")]
         ]
         markup = InlineKeyboardMarkup(keyboard)
         
         msg_text = (
-            "❌ <b>Subscription Required!</b>\n\n"
+            "🛒 <b>Bot Subscription Shop</b>\n\n"
             "Aapke paas active subscription nahi hai ya time khatam ho chuka hai.\n"
             "Bot use karne ke liye neeche diye gaye plans me se koi ek plan select karein:"
         )
@@ -453,7 +449,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    # Allow plan selection and status check without active subscription check
     if data.startswith("buy_plan_"):
         days = data.split("_")[2]
         context.user_data['buying_days'] = days
@@ -463,7 +458,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo=QR_IMAGE_URL,
             caption=f"💳 <b>Payment Details ({days} Days Plan)</b>\n\n"
                     "1. Upar diye gaye QR Code par payment karein.\n"
-                    "2. Payment karne ke baad **Payment ka Screenshot/Receipt** is chat me bhej dein.\n"
+                    "2. Payment karne ke baad **Payment ka Screenshot ya Transaction ID** is chat me bhej dein.\n"
                     "Admin ke verify karte hi aapka subscription activate ho jayega!",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML"
@@ -475,7 +470,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sub["active"]:
             await query.message.reply_text("✅ Aapka subscription active ho chuka hai! Ab /start bhejayein.")
         else:
-            await query.message.reply_text("⏳ Abhi aapka payment approve nahi hua hai. Kripya intezaar karein ya admin se contact karein.")
+            await query.message.reply_text("⏳ Abhi aapka payment approve nahi hua hai. Kripya intezaار karein.")
         return
 
     if not await check_access(update, context):
@@ -492,7 +487,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
          
         if not runtime['is_running']:
-            runtime['total_sent'] = 0  # Reset counter to 0 on fresh start
+            runtime['total_sent'] = 0
             runtime['is_running'] = True
             save_user_meta_to_disk(user_id)
             asyncio.create_task(broadcast_for_user(user_id))
@@ -604,7 +599,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(data_json)
         
         try:
-            await context.bot.send_message(chat_id=int(target_uid), text="🎉 Aapka subscription approve ho gaya hai! Ab /start bhej kar bot use karein.")
+            await context.bot.send_message(chat_id=int(target_uid), text="🎉 Aapka payment approve ho gaya aur subscription activate ho gaya! Ab /start bhej kar bot use karein.")
         except:
             pass
             
@@ -619,6 +614,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_uid in data_json.get("pending_requests", {}):
             del data_json["pending_requests"][target_uid]
             save_data(data_json)
+        try:
+            await context.bot.send_message(chat_id=int(target_uid), text="❌ Aapka payment reject kar diya gaya hai. Kripya sahi payment karein.")
+        except:
+            pass
         await query.answer("❌ Request Rejected!", show_alert=True)
         await show_pending_requests(query)
 
@@ -699,7 +698,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    # Check if user is sending payment proof screenshot description or text
     buying_days = context.user_data.get('buying_days')
     if buying_days and not get_user_subscription(user_id)["active"]:
         try:
@@ -716,5 +714,213 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['buying_days'] = None
         await update.message.reply_text("✅ Aapka payment proof bhej diya gaya hai! Admin ke verify karne par approval mil jayegi.")
         
-        # Notify Admin
         try:
+            keyboard = [
+                [
+                    InlineKeyboardButton(f"✅ Approve ({buying_days}d)", callback_data=f"approve_req_{user_id}_{buying_days}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_req_{user_id}")
+                ]
+            ]
+            await context.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"🔔 <b>New Payment Request!</b>\nUser ID: <code>{user_id}</code>\nPlan: <b>{buying_days} Days</b>",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        return
+
+    if user_id != ADMIN_USER_ID and not await check_access(update, context):
+        return
+
+    runtime = get_user_runtime(user_id)
+    state = context.user_data.get('state')
+    user_text = update.message.text.strip() if update.message.text else ""
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if state == 'WAITING_ADMIN_GRANT' and user_id == ADMIN_USER_ID:
+        context.user_data['state'] = None
+        try:
+            parts = user_text.split()
+            target_id = parts[0]
+            days = int(parts[1])
+            
+            data = load_data()
+            expiry = datetime.now() + timedelta(days=days)
+            data["subscriptions"][target_id] = {"expires": expiry.isoformat()}
+            save_data(data)
+            
+            await update.message.reply_text(f"✅ Success! User ID <code>{target_id}</code> ko {days} din ka access de diya gaya hai.", parse_mode="HTML")
+        except Exception:
+            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>123456789 30</code>", parse_mode="HTML")
+        return
+
+    if state == 'WAITING_PHONE':
+        phone_num = user_text
+        context.user_data['phone'] = phone_num
+        s_path = os.path.join(SESSION_DIR, f"user_{user_id}_phone_{int(asyncio.get_event_loop().time())}")
+        client = TelegramClient(s_path, API_ID, API_HASH)
+        await client.connect()
+        try:
+            sent = await client.send_code_request(phone_num)
+            context.user_data['phone_client'] = client
+            context.user_data['phone_hash'] = sent.phone_code_hash
+            context.user_data['state'] = 'WAITING_PHONE_CODE'
+            await update.message.reply_text("📨 Telegram OTP code bhej diya gaya hai. Code yahan enter karein:")
+        except Exception as e:
+            await client.disconnect()
+            await update.message.reply_text(f"❌ Error: {e}")
+            context.user_data['state'] = None
+        return
+
+    elif state == 'WAITING_PHONE_CODE':
+        code = user_text
+        client = context.user_data.get('phone_client')
+        phone_num = context.user_data.get('phone')
+        phone_hash = context.user_data.get('phone_hash')
+        try:
+            await client.sign_in(phone_num, code, phone_code_hash=phone_hash)
+            me = await client.get_me()
+            phone = f"+{me.phone}" if me and me.phone else phone_num
+            
+            await client(UpdateStatusRequest(offline=False))
+            asyncio.create_task(keep_client_alive(client))
+            
+            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
+            setup_dm_handler(client, acc_dict)
+            runtime['accounts'].append(acc_dict)
+            save_user_meta_to_disk(user_id)
+            context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya!", parse_mode="HTML")
+            await start(update, context)
+        except SessionPasswordNeededError:
+            context.user_data['state'] = 'WAITING_PHONE_PASSWORD'
+            await update.message.reply_text("🔒 2-Step Verification password enter karein:")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+            await client.disconnect()
+            context.user_data['state'] = None
+        return
+
+    elif state == 'WAITING_PHONE_PASSWORD':
+        password = user_text
+        client = context.user_data.get('phone_client')
+        phone_num = context.user_data.get('phone')
+        try:
+            await client.sign_in(password=password)
+            me = await client.get_me()
+            phone = f"+{me.phone}" if me and me.phone else phone_num
+            
+            await client(UpdateStatusRequest(offline=False))
+            asyncio.create_task(keep_client_alive(client))
+            
+            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
+            setup_dm_handler(client, acc_dict)
+            runtime['accounts'].append(acc_dict)
+            save_user_meta_to_disk(user_id)
+            context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
+            await start(update, context)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+            await client.disconnect()
+            context.user_data['state'] = None
+        return
+
+    elif state == 'WAITING_STRING_SESSION':
+        string_session = user_text
+        s_path = os.path.join(SESSION_DIR, f"user_{user_id}_str_{int(asyncio.get_event_loop().time())}")
+        client = TelegramClient(StringSession(string_session), API_ID, API_HASH)
+        try:
+            await client.connect()
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                phone = f"+{me.phone}" if me and me.phone else f"Session_{user_id}"
+                
+                with open(f"{s_path}.session", "w") as f:
+                    f.write(client.session.save())
+                
+                asyncio.create_task(keep_client_alive(client))
+                acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
+                setup_dm_handler(client, acc_dict)
+                runtime['accounts'].append(acc_dict)
+                save_user_meta_to_disk(user_id)
+                context.user_data['state'] = None
+                await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> added!", parse_mode="HTML")
+                await start(update, context)
+            else:
+                await update.message.reply_text("❌ Invalid Session String!")
+                context.user_data['state'] = None
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+            context.user_data['state'] = None
+        return
+
+    elif state == 'WAITING_GLOBAL_MSG':
+        lines = [l.strip() for l in user_text.split('\n') if l.strip()]
+        for acc in runtime['accounts']:
+            acc['messages'] = lines
+        save_user_meta_to_disk(user_id)
+        context.user_data['state'] = None
+        await update.message.reply_text(f"✅ Aapke accounts ke liye {len(lines)} Broadcast Messages set kar diye gaye hain!")
+        await start(update, context)
+        return
+
+    elif state == 'WAITING_GLOBAL_DM':
+        for acc in runtime['accounts']:
+            acc['auto_reply'] = user_text
+        save_user_meta_to_disk(user_id)
+        context.user_data['state'] = None
+        await update.message.reply_text(f"✅ Aapke accounts ke liye DM Auto-Reply set ho gaya:\n<code>{user_text}</code>", parse_mode="HTML")
+        await start(update, context)
+        return
+
+    elif state == 'WAITING_SPEED':
+        try:
+            val = int(user_text)
+            for acc in runtime['accounts']:
+                acc['group_delay'] = val
+            save_user_meta_to_disk(user_id)
+            context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Speed successfully updated to <b>{val}s</b>!", parse_mode="HTML")
+            await start(update, context)
+        except:
+            await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 3)")
+        return
+
+    elif state == 'WAITING_CYCLE':
+        try:
+            val = int(user_text)
+            for acc in runtime['accounts']:
+                acc['resend_interval'] = val
+            save_user_meta_to_disk(user_id)
+            context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Cycle Interval successfully updated to <b>{val}s</b>!", parse_mode="HTML")
+            await start(update, context)
+        except:
+            await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 60)")
+        return
+
+async def post_init(application):
+    print("Loading sessions...")
+    await load_saved_sessions()
+    print("All user sessions loaded successfully.")
+
+if __name__ == '__main__':
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    print("Master Automated Shop Bot is running...")
+    app.run_polling()
