@@ -20,14 +20,13 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789"))
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789")) # Apni Telegram ID yahan dalein
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "G_KlNG") # Apna Telegram username yahan dalein
 
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
 
 DATA_FILE = "bot_data.json"
-
-# In-memory runtime data per user: { user_id: { 'accounts': [...], 'is_running': False, 'total_sent': 0 } }
 USER_RUNTIMES = {}
 
 logging.basicConfig(level=logging.INFO)
@@ -63,9 +62,13 @@ def save_data(data):
 
 def get_user_runtime(user_id):
     if user_id not in USER_RUNTIMES:
+        data = load_data()
+        users_meta = data.get("users_data", {})
+        u_meta = users_meta.get(str(user_id), {})
+        
         USER_RUNTIMES[user_id] = {
             'accounts': [],
-            'is_running': False,
+            'is_running': u_meta.get('is_running', False),
             'total_sent': 0
         }
     return USER_RUNTIMES[user_id]
@@ -102,11 +105,18 @@ async def check_access(update: Update):
         
     sub = get_user_subscription(user.id)
     if not sub["active"]:
-        await update.effective_message.reply_text(
-            "❌ <b>Your time is up!</b>\n\n"
-            "If you want to purchase more time or get access, contact the admin.",
-            parse_mode="HTML"
+        keyboard = [[InlineKeyboardButton("📞 Contact Admin for Subscription", url=f"https://t.me/{ADMIN_USERNAME}")]]
+        markup = InlineKeyboardMarkup(keyboard)
+        
+        msg_text = (
+            "❌ <b>Subscription Required!</b>\n\n"
+            "Aapke pas is bot ko use karne ke liye active subscription nahi hai ya fir aapka time khatam ho chuka hai.\n"
+            "Subscription lene ya time badhane ke liye neeche diye gaye button par click karke Admin se contact karein:"
         )
+        if update.callback_query:
+            await update.callback_query.message.reply_text(msg_text, reply_markup=markup, parse_mode="HTML")
+        elif update.message:
+            await update.message.reply_text(msg_text, reply_markup=markup, parse_mode="HTML")
         return False
     return True
 
@@ -140,7 +150,6 @@ async def load_saved_sessions():
     for filename in os.listdir(SESSION_DIR):
         if filename.endswith(".session"):
             parts = filename[:-8].split("_")
-            # Expected filename format: owner_uid_identifier.session
             if len(parts) >= 2 and parts[1].isdigit():
                 owner_id = int(parts[1])
                 session_path = os.path.join(SESSION_DIR, filename[:-8])
@@ -170,6 +179,9 @@ async def load_saved_sessions():
                             }
                             setup_dm_handler(client, acc_dict)
                             runtime['accounts'].append(acc_dict)
+                            
+                            if runtime['is_running']:
+                                asyncio.create_task(broadcast_for_user(owner_id))
                     else:
                         await client.disconnect()
                 except Exception as e:
@@ -189,7 +201,12 @@ def save_user_meta_to_disk(user_id):
             'resend_interval': acc.get('resend_interval', 60),
             'auto_reply': acc.get('auto_reply', '')
         }
-    data["users_data"][str(user_id)] = {'accounts_meta': acc_data}
+    
+    if str(user_id) not in data["users_data"]:
+        data["users_data"][str(user_id)] = {}
+        
+    data["users_data"][str(user_id)]['accounts_meta'] = acc_data
+    data["users_data"][str(user_id)]['is_running'] = runtime['is_running']
     save_data(data)
 
 # --- MAIN MENU INTERFACE ---
@@ -416,6 +433,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not runtime['is_running']:
             runtime['total_sent'] = 0  # Reset counter to 0 on fresh start
             runtime['is_running'] = True
+            save_user_meta_to_disk(user_id)
             asyncio.create_task(broadcast_for_user(user_id))
             await query.message.reply_text("✅ Aapka broadcast start kar diya gaya hai!")
         else:
@@ -423,6 +441,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "stop_all":
         runtime['is_running'] = False
+        save_user_meta_to_disk(user_id)
         await query.message.reply_text("⏹ Aapke broadcasts stop kar diye gaye hain.")
 
     elif data == "settings_menu":
@@ -572,7 +591,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_home":
         await start(update, context)
 
-# --- TEXT HANDLER ---
+# --- TEXT HANDLER WITH AUTO-DELETE & RETURN TO MENU ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not context.user_data:
         return
@@ -586,7 +605,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     user_text = update.message.text.strip() if update.message.text else ""
 
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
     if state == 'WAITING_ADMIN_GRANT' and user_id == ADMIN_USER_ID:
+        context.user_data['state'] = None
         try:
             parts = user_text.split()
             target_id = parts[0]
@@ -597,9 +622,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["subscriptions"][target_id] = {"expires": expiry.isoformat()}
             save_data(data)
             
-            context.user_data['state'] = None
             await update.message.reply_text(f"✅ Success! User ID <code>{target_id}</code> ko {days} din ka access de diya gaya hai.", parse_mode="HTML")
-        except Exception as e:
+        except Exception:
             await update.message.reply_text("❌ Sahi format me dalein. Example: <code>123456789 30</code>", parse_mode="HTML")
         return
 
@@ -619,6 +643,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.disconnect()
             await update.message.reply_text(f"❌ Error: {e}")
             context.user_data['state'] = None
+        return
 
     elif state == 'WAITING_PHONE_CODE':
         code = user_text
@@ -637,8 +662,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setup_dm_handler(client, acc_dict)
             runtime['accounts'].append(acc_dict)
             save_user_meta_to_disk(user_id)
-            await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya!", parse_mode="HTML")
             context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya!", parse_mode="HTML")
+            await start(update, context)
         except SessionPasswordNeededError:
             context.user_data['state'] = 'WAITING_PHONE_PASSWORD'
             await update.message.reply_text("🔒 2-Step Verification password enter karein:")
@@ -646,6 +672,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error: {e}")
             await client.disconnect()
             context.user_data['state'] = None
+        return
 
     elif state == 'WAITING_PHONE_PASSWORD':
         password = user_text
@@ -663,12 +690,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setup_dm_handler(client, acc_dict)
             runtime['accounts'].append(acc_dict)
             save_user_meta_to_disk(user_id)
-            await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
             context.user_data['state'] = None
+            await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
+            await start(update, context)
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
             await client.disconnect()
             context.user_data['state'] = None
+        return
 
     elif state == 'WAITING_STRING_SESSION':
         string_session = user_text
@@ -688,13 +717,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 setup_dm_handler(client, acc_dict)
                 runtime['accounts'].append(acc_dict)
                 save_user_meta_to_disk(user_id)
+                context.user_data['state'] = None
                 await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> added!", parse_mode="HTML")
+                await start(update, context)
             else:
                 await update.message.reply_text("❌ Invalid Session String!")
-            context.user_data['state'] = None
+                context.user_data['state'] = None
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
             context.user_data['state'] = None
+        return
 
     elif state == 'WAITING_GLOBAL_MSG':
         lines = [l.strip() for l in user_text.split('\n') if l.strip()]
@@ -703,6 +735,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_meta_to_disk(user_id)
         context.user_data['state'] = None
         await update.message.reply_text(f"✅ Aapke accounts ke liye {len(lines)} Broadcast Messages set kar diye gaye hain!")
+        await start(update, context)
+        return
 
     elif state == 'WAITING_GLOBAL_DM':
         for acc in runtime['accounts']:
@@ -710,6 +744,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_meta_to_disk(user_id)
         context.user_data['state'] = None
         await update.message.reply_text(f"✅ Aapke accounts ke liye DM Auto-Reply set ho gaya:\n<code>{user_text}</code>", parse_mode="HTML")
+        await start(update, context)
+        return
 
     elif state == 'WAITING_SPEED':
         try:
@@ -718,9 +754,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 acc['group_delay'] = val
             save_user_meta_to_disk(user_id)
             context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Speed (Group Delay) successfully updated to <b>{val}s</b>!", parse_mode="HTML")
+            await update.message.reply_text(f"✅ Speed successfully updated to <b>{val}s</b>!", parse_mode="HTML")
+            await start(update, context)
         except:
             await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 3)")
+        return
 
     elif state == 'WAITING_CYCLE':
         try:
@@ -730,8 +768,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_user_meta_to_disk(user_id)
             context.user_data['state'] = None
             await update.message.reply_text(f"✅ Cycle Interval successfully updated to <b>{val}s</b>!", parse_mode="HTML")
+            await start(update, context)
         except:
             await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 60)")
+        return
 
 async def post_init(application):
     print("Loading sessions...")
@@ -749,5 +789,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Isolated Multi-User Paid Bot is running...")
+    print("Master Subscription Bot is running...")
     app.run_polling()
