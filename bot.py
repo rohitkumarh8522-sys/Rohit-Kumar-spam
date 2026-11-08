@@ -20,15 +20,15 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789")) # Apni Telegram ID yahan dalein
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789"))
 
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
 
 DATA_FILE = "bot_data.json"
-USER_ACCOUNTS = []
-IS_RUNNING = False
-TOTAL_MESSAGES_SENT = 0
+
+# In-memory runtime data per user: { user_id: { 'accounts': [...], 'is_running': False, 'total_sent': 0 } }
+USER_RUNTIMES = {}
 
 logging.basicConfig(level=logging.INFO)
 LOGIN_DATA = {}
@@ -46,13 +46,13 @@ def run_flask():
 
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"subscriptions": {}, "accounts_data": {}}
+        return {"subscriptions": {}, "users_data": {}}
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         print(f"Error loading data: {e}")
-        return {"subscriptions": {}, "accounts_data": {}}
+        return {"subscriptions": {}, "users_data": {}}
 
 def save_data(data):
     try:
@@ -60,6 +60,15 @@ def save_data(data):
             json.dump(data, f, ensure_ascii=False, indent=4)
     except Exception as e:
         print(f"Error saving data: {e}")
+
+def get_user_runtime(user_id):
+    if user_id not in USER_RUNTIMES:
+        USER_RUNTIMES[user_id] = {
+            'accounts': [],
+            'is_running': False,
+            'total_sent': 0
+        }
+    return USER_RUNTIMES[user_id]
 
 def get_user_subscription(user_id):
     data = load_data()
@@ -122,55 +131,65 @@ def setup_dm_handler(client, acc):
                 print(f"DM Reply Error for {acc['phone']}: {e}")
 
 async def load_saved_sessions():
-    global USER_ACCOUNTS
     if not os.path.exists(SESSION_DIR):
         return
 
     data = load_data()
-    accounts_meta = data.get("accounts_data", {})
+    users_meta = data.get("users_data", {})
 
     for filename in os.listdir(SESSION_DIR):
         if filename.endswith(".session"):
-            session_name = filename[:-8]  
-            session_path = os.path.join(SESSION_DIR, session_name)
-            client = TelegramClient(session_path, API_ID, API_HASH)
-            try:
-                await client.connect()
-                if await client.is_user_authorized():
-                    me = await client.get_me()
-                    phone = f"+{me.phone}" if me and me.phone else session_name
-                    
-                    if not any(acc['phone'] == phone for acc in USER_ACCOUNTS):
-                        asyncio.create_task(keep_client_alive(client))
+            parts = filename[:-8].split("_")
+            # Expected filename format: owner_uid_identifier.session
+            if len(parts) >= 2 and parts[1].isdigit():
+                owner_id = int(parts[1])
+                session_path = os.path.join(SESSION_DIR, filename[:-8])
+                client = TelegramClient(session_path, API_ID, API_HASH)
+                try:
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        me = await client.get_me()
+                        phone = f"+{me.phone}" if me and me.phone else parts[0]
                         
-                        meta = accounts_meta.get(phone, {})
-                        acc_dict = {
-                            'phone': phone,
-                            'client': client,
-                            'active': True,
-                            'messages': meta.get('messages', []),
-                            'group_delay': meta.get('group_delay', 2),
-                            'resend_interval': meta.get('resend_interval', 60),
-                            'auto_reply': meta.get('auto_reply', '')
-                        }
-                        setup_dm_handler(client, acc_dict)
-                        USER_ACCOUNTS.append(acc_dict)
-                else:
-                    await client.disconnect()
-            except Exception as e:
-                print(f"Failed to load session {filename}: {e}")
+                        runtime = get_user_runtime(owner_id)
+                        if not any(acc['phone'] == phone for acc in runtime['accounts']):
+                            asyncio.create_task(keep_client_alive(client))
+                            
+                            user_meta_dict = users_meta.get(str(owner_id), {})
+                            accounts_meta = user_meta_dict.get('accounts_meta', {})
+                            meta = accounts_meta.get(phone, {})
+                            
+                            acc_dict = {
+                                'phone': phone,
+                                'client': client,
+                                'active': True,
+                                'messages': meta.get('messages', []),
+                                'group_delay': meta.get('group_delay', 2),
+                                'resend_interval': meta.get('resend_interval', 60),
+                                'auto_reply': meta.get('auto_reply', '')
+                            }
+                            setup_dm_handler(client, acc_dict)
+                            runtime['accounts'].append(acc_dict)
+                    else:
+                        await client.disconnect()
+                except Exception as e:
+                    print(f"Failed to load session {filename}: {e}")
 
-def save_account_meta_to_disk():
+def save_user_meta_to_disk(user_id):
     data = load_data()
+    if "users_data" not in data:
+        data["users_data"] = {}
+    
+    runtime = get_user_runtime(user_id)
     acc_data = {}
-    for acc in USER_ACCOUNTS:
+    for acc in runtime['accounts']:
         acc_data[acc['phone']] = {
             'messages': acc['messages'],
             'group_delay': acc.get('group_delay', 2),
             'resend_interval': acc.get('resend_interval', 60),
             'auto_reply': acc.get('auto_reply', '')
         }
-    data["accounts_data"] = acc_data
+    data["users_data"][str(user_id)] = {'accounts_meta': acc_data}
     save_data(data)
 
 # --- MAIN MENU INTERFACE ---
@@ -182,25 +201,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = get_user_subscription(user.id)
     time_left = sub["expires"]
     
-    status_str = "▶️ RUNNING" if IS_RUNNING else "⏹ STOPPED"
-    active_count = sum(1 for acc in USER_ACCOUNTS if acc['active'])
+    runtime = get_user_runtime(user.id)
+    status_str = "▶️ RUNNING" if runtime['is_running'] else "⏹ STOPPED"
+    active_count = sum(1 for acc in runtime['accounts'] if acc['active'])
     
     speed_str = "2s"
     cycle_str = "60s"
-    if USER_ACCOUNTS:
-        speed_str = f"{USER_ACCOUNTS[0].get('group_delay', 2)}s"
-        cycle_str = f"{USER_ACCOUNTS[0].get('resend_interval', 60)}s"
+    if runtime['accounts']:
+        speed_str = f"{runtime['accounts'][0].get('group_delay', 2)}s"
+        cycle_str = f"{runtime['accounts'][0].get('resend_interval', 60)}s"
 
     text = (
         "✨ <b>Master Control Bot</b> ✨\n"
         "👤 <b>User Panel</b>\n"
         f"⏳ <b>Time:</b> {time_left}\n\n"
-        f"📊 <b>Accounts:</b> {len(USER_ACCOUNTS)} (Running: {active_count})\n"
-        f"📨 <b>Messages Sent:</b> {TOTAL_MESSAGES_SENT}\n"
+        f"📊 <b>Accounts:</b> {len(runtime['accounts'])} (Running: {active_count})\n"
+        f"📨 <b>Messages Sent:</b> {runtime['total_sent']}\n"
         f"⚡ <b>Speed:</b> {speed_str} | 🔄 <b>Cycle:</b> {cycle_str}"
     )
 
-    # EXACT BUTTON LAYOUT REQUESTED
     keyboard = [
         [
             InlineKeyboardButton("▶️ Start All", callback_data="start_all"),
@@ -242,16 +261,16 @@ async def settings_menu(query):
     markup = InlineKeyboardMarkup(keyboard)
     try:
         await query.message.edit_text(
-            "⚙️ <b>Settings</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers configure kar sakte hain:",
+            "⚙️ <b>Settings</b>\n\nYahan se aap apne broadcast messages, DM auto-reply, speed aur cycle timers configure kar sakte hain:",
             reply_markup=markup, parse_mode="HTML"
         )
     except:
         await query.message.reply_text(
-            "⚙️ <b>Settings</b>\n\nYahan se aap broadcast messages, DM auto-reply, speed aur cycle timers configure kar sakte hain:",
+            "⚙️ <b>Settings</b>\n\nYahan se aap apne broadcast messages, DM auto-reply, speed aur cycle timers configure kar sakte hain:",
             reply_markup=markup, parse_mode="HTML"
         )
 
-# --- INTERACTIVE ADMIN PANEL (VIA /admin) ---
+# --- ADMIN PANEL ---
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != ADMIN_USER_ID:
@@ -294,19 +313,20 @@ async def show_subscriptions_list(query):
         await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 # --- DELETE ACCOUNT MENU ---
-async def delete_account_menu(query, page=0):
-    if not USER_ACCOUNTS:
+async def delete_account_menu(query, user_id, page=0):
+    runtime = get_user_runtime(user_id)
+    if not runtime['accounts']:
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]])
         try:
-            await query.message.edit_text("❌ Koi bhi account login nahi hai!", reply_markup=markup)
+            await query.message.edit_text("❌ Aapka koi bhi account login nahi hai!", reply_markup=markup)
         except:
-            await query.message.reply_text("❌ Koi bhi account login nahi hai!", reply_markup=markup)
+            await query.message.reply_text("❌ Aapka koi bhi account login nahi hai!", reply_markup=markup)
         return
 
     per_page = 5
-    total_pages = (len(USER_ACCOUNTS) + per_page - 1) // per_page
+    total_pages = (len(runtime['accounts']) + per_page - 1) // per_page
     page = max(0, min(page, total_pages - 1))
-    current_accs = USER_ACCOUNTS[page * per_page : (page + 1) * per_page]
+    current_accs = runtime['accounts'][page * per_page : (page + 1) * per_page]
 
     keyboard = []
     for idx, acc in enumerate(current_accs):
@@ -336,53 +356,43 @@ async def delete_account_menu(query, page=0):
             reply_markup=markup, parse_mode="HTML"
         )
 
-# --- BROADCAST LOOP ---
-async def broadcast_for_account(acc):
-    global TOTAL_MESSAGES_SENT
-    client = acc['client']
-    while IS_RUNNING:
-        account_messages = acc['messages']
-        group_delay = acc.get('group_delay', 2)
-        resend_interval = acc.get('resend_interval', 60)
-    
-        if not account_messages:
-            await asyncio.sleep(5)
-            continue
-             
-        if not acc['active']:
-            break
-             
-        try:
-            await client(UpdateStatusRequest(offline=False))
-            async for dialog in client.iter_dialogs():
-                if not IS_RUNNING or not acc['active']:
-                    break
-                if dialog.is_group:
-                    try:
-                        random_msg = random.choice(account_messages)
-                        await client.send_message(dialog.id, random_msg)
-                        TOTAL_MESSAGES_SENT += 1
-                        await asyncio.sleep(group_delay)
-                    except Exception as e:
-                        print(f"Send Error for {acc['phone']}: {e}")
-        except Exception as e:
-            print(f"Iter Error for {acc['phone']}: {e}")
-
-        if IS_RUNNING:
-            await asyncio.sleep(resend_interval)
-
-async def run_broadcast_loop():
-    global IS_RUNNING
-    while IS_RUNNING:
-        active_clients = [acc for acc in USER_ACCOUNTS if acc['active'] and acc['messages']]
+# --- ISOLATED BROADCAST LOOP PER USER ---
+async def broadcast_for_user(user_id):
+    runtime = get_user_runtime(user_id)
+    while runtime['is_running']:
+        active_clients = [acc for acc in runtime['accounts'] if acc['active'] and acc['messages']]
         if not active_clients:
             await asyncio.sleep(2)
             continue
-        await asyncio.gather(*(broadcast_for_account(acc) for acc in active_clients))
+            
+        for acc in active_clients:
+            if not runtime['is_running']:
+                break
+            client = acc['client']
+            account_messages = acc['messages']
+            group_delay = acc.get('group_delay', 2)
+            resend_interval = acc.get('resend_interval', 60)
+            
+            try:
+                await client(UpdateStatusRequest(offline=False))
+                async for dialog in client.iter_dialogs():
+                    if not runtime['is_running'] or not acc['active']:
+                        break
+                    if dialog.is_group:
+                        try:
+                            random_msg = random.choice(account_messages)
+                            await client.send_message(dialog.id, random_msg)
+                            runtime['total_sent'] += 1
+                            await asyncio.sleep(group_delay)
+                        except Exception as e:
+                            print(f"Send Error for {acc['phone']}: {e}")
+            except Exception as e:
+                print(f"Iter Error for {acc['phone']}: {e}")
+                
+            await asyncio.sleep(resend_interval)
 
 # --- BUTTON HANDLER ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING
     query = update.callback_query
     if not query or not query.message:
         return
@@ -391,43 +401,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
         return
 
+    user_id = query.from_user.id
+    runtime = get_user_runtime(user_id)
     data = query.data
 
     if data == "start_all":
-        if not USER_ACCOUNTS:
-            await query.message.reply_text("❌ Pehle kam se kam 1 account login karein!")
+        if not runtime['accounts']:
+            await query.message.reply_text("❌ Pehle kam se kam apna 1 account login karein!")
             return
-        if not any(acc['messages'] for acc in USER_ACCOUNTS):
-            await query.message.reply_text("❌ Kisi bhi account me broadcast messages set nahi hain! Settings me jaakar set karein.")
+        if not any(acc['messages'] for acc in runtime['accounts']):
+            await query.message.reply_text("❌ Aapke kisi bhi account me broadcast messages set nahi hain! Settings me jaakar set karein.")
             return
          
-        if not IS_RUNNING:
-            IS_RUNNING = True
-            asyncio.create_task(run_broadcast_loop())
-            await query.message.reply_text("✅ Broadcast start kar diya gaya hai!")
+        if not runtime['is_running']:
+            runtime['total_sent'] = 0  # Reset counter to 0 on fresh start
+            runtime['is_running'] = True
+            asyncio.create_task(broadcast_for_user(user_id))
+            await query.message.reply_text("✅ Aapka broadcast start kar diya gaya hai!")
         else:
-            await query.message.reply_text("⚠️ Broadcast pehle se running hai!")
+            await query.message.reply_text("⚠️ Aapka broadcast pehle se running hai!")
 
     elif data == "stop_all":
-        IS_RUNNING = False
-        await query.message.reply_text("⏹ Broadcasts stop kar diye gaye hain.")
+        runtime['is_running'] = False
+        await query.message.reply_text("⏹ Aapke broadcasts stop kar diye gaye hain.")
 
     elif data == "settings_menu":
         await settings_menu(query)
 
     elif data == "set_broadcast_msg":
-        if not USER_ACCOUNTS:
+        if not runtime['accounts']:
             await query.message.reply_text("❌ Pehle account login karein!")
             return
         context.user_data['state'] = 'WAITING_GLOBAL_MSG'
-        await query.message.reply_text("📝 Sabhi active accounts ke liye **Broadcast Messages** bhejayein.\n(Har nayi line ek naya message ban jayegi):", parse_mode="HTML")
+        await query.message.reply_text("📝 Aapke accounts ke liye **Broadcast Messages** bhejayein.\n(Har nayi line ek naya message ban jayegi):", parse_mode="HTML")
 
     elif data == "set_dm_msg":
-        if not USER_ACCOUNTS:
+        if not runtime['accounts']:
             await query.message.reply_text("❌ Pehle account login karein!")
             return
         context.user_data['state'] = 'WAITING_GLOBAL_DM'
-        await query.message.reply_text("🤖 Sabhi accounts ke liye **DM Auto-Reply** message bhejayein:", parse_mode="HTML")
+        await query.message.reply_text("🤖 Aapke accounts ke liye **DM Auto-Reply** message bhejayein:", parse_mode="HTML")
 
     elif data == "set_speed_timer":
         context.user_data['state'] = 'WAITING_SPEED'
@@ -454,30 +467,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("🔑 Apni Telethon String Session yahan bhejayein:")
 
     elif data == "delete_account_menu":
-        await delete_account_menu(query, page=0)
+        await delete_account_menu(query, user_id, page=0)
 
     elif data.startswith("del_page_"):
         page_num = int(data.split("_")[2])
-        await delete_account_menu(query, page=page_num)
+        await delete_account_menu(query, user_id, page=page_num)
 
     elif data.startswith("del_acc_"):
         idx = int(data.split("_")[2])
-        if idx < len(USER_ACCOUNTS):
-            acc = USER_ACCOUNTS.pop(idx)
+        if idx < len(runtime['accounts']):
+            acc = runtime['accounts'].pop(idx)
             try:
                 await acc['client'].disconnect()
-                s_file = f"{acc['client'].session.filename}.session"
+                s_file = f"{SESSION_DIR}/user_{user_id}_{acc['phone'].replace('+', '')}.session"
                 if os.path.exists(s_file):
                     os.remove(s_file)
             except:
                 pass
-            save_account_meta_to_disk()
+            save_user_meta_to_disk(user_id)
             await query.message.reply_text(f"🗑 Account {acc['phone']} successfully remove kar diya gaya.")
-            await delete_account_menu(query, page=0)
+            await delete_account_menu(query, user_id, page=0)
 
     # --- ADMIN CALLBACKS ---
     elif data == "admin_grant_prompt":
-        if query.from_user.id != ADMIN_USER_ID:
+        if user_id != ADMIN_USER_ID:
             return
         context.user_data['state'] = 'WAITING_ADMIN_GRANT'
         await query.message.reply_text(
@@ -487,12 +500,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "admin_sub_list":
-        if query.from_user.id != ADMIN_USER_ID:
+        if user_id != ADMIN_USER_ID:
             return
         await show_subscriptions_list(query)
 
     elif data == "back_to_admin":
-        if query.from_user.id != ADMIN_USER_ID:
+        if user_id != ADMIN_USER_ID:
             return
         keyboard = [
             [InlineKeyboardButton("➕ Grant Access to User", callback_data="admin_grant_prompt")],
@@ -506,7 +519,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data.startswith("admin_manage_user_"):
-        if query.from_user.id != ADMIN_USER_ID:
+        if user_id != ADMIN_USER_ID:
             return
         uid = data.split("_")[3]
         data_json = load_data()
@@ -530,7 +543,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     elif data.startswith("admin_add7_") or data.startswith("admin_add30_"):
-        if query.from_user.id != ADMIN_USER_ID:
+        if user_id != ADMIN_USER_ID:
             return
         parts = data.split("_")
         days_to_add = 7 if "7" in parts[1] else 30
@@ -546,7 +559,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_subscriptions_list(query)
 
     elif data.startswith("admin_rem_"):
-        if query.from_user.id != ADMIN_USER_ID:
+        if user_id != ADMIN_USER_ID:
             return
         uid = data.split("_")[2]
         data_json = load_data()
@@ -568,10 +581,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != ADMIN_USER_ID and not await check_access(update):
         return
 
+    user_id = user.id
+    runtime = get_user_runtime(user_id)
     state = context.user_data.get('state')
     user_text = update.message.text.strip() if update.message.text else ""
 
-    if state == 'WAITING_ADMIN_GRANT' and user.id == ADMIN_USER_ID:
+    if state == 'WAITING_ADMIN_GRANT' and user_id == ADMIN_USER_ID:
         try:
             parts = user_text.split()
             target_id = parts[0]
@@ -591,7 +606,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == 'WAITING_PHONE':
         phone_num = user_text
         context.user_data['phone'] = phone_num
-        s_path = os.path.join(SESSION_DIR, f"phone_{user.id}_{int(asyncio.get_event_loop().time())}")
+        s_path = os.path.join(SESSION_DIR, f"user_{user_id}_phone_{int(asyncio.get_event_loop().time())}")
         client = TelegramClient(s_path, API_ID, API_HASH)
         await client.connect()
         try:
@@ -620,8 +635,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
             setup_dm_handler(client, acc_dict)
-            USER_ACCOUNTS.append(acc_dict)
-            save_account_meta_to_disk()
+            runtime['accounts'].append(acc_dict)
+            save_user_meta_to_disk(user_id)
             await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya!", parse_mode="HTML")
             context.user_data['state'] = None
         except SessionPasswordNeededError:
@@ -646,8 +661,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
             setup_dm_handler(client, acc_dict)
-            USER_ACCOUNTS.append(acc_dict)
-            save_account_meta_to_disk()
+            runtime['accounts'].append(acc_dict)
+            save_user_meta_to_disk(user_id)
             await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
             context.user_data['state'] = None
         except Exception as e:
@@ -657,13 +672,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif state == 'WAITING_STRING_SESSION':
         string_session = user_text
-        s_path = os.path.join(SESSION_DIR, f"str_{user.id}_{int(asyncio.get_event_loop().time())}")
+        s_path = os.path.join(SESSION_DIR, f"user_{user_id}_str_{int(asyncio.get_event_loop().time())}")
         client = TelegramClient(StringSession(string_session), API_ID, API_HASH)
         try:
             await client.connect()
             if await client.is_user_authorized():
                 me = await client.get_me()
-                phone = f"+{me.phone}" if me and me.phone else f"Session_{user.id}"
+                phone = f"+{me.phone}" if me and me.phone else f"Session_{user_id}"
                 
                 with open(f"{s_path}.session", "w") as f:
                     f.write(client.session.save())
@@ -671,8 +686,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 asyncio.create_task(keep_client_alive(client))
                 acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
                 setup_dm_handler(client, acc_dict)
-                USER_ACCOUNTS.append(acc_dict)
-                save_account_meta_to_disk()
+                runtime['accounts'].append(acc_dict)
+                save_user_meta_to_disk(user_id)
                 await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> added!", parse_mode="HTML")
             else:
                 await update.message.reply_text("❌ Invalid Session String!")
@@ -683,25 +698,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif state == 'WAITING_GLOBAL_MSG':
         lines = [l.strip() for l in user_text.split('\n') if l.strip()]
-        for acc in USER_ACCOUNTS:
+        for acc in runtime['accounts']:
             acc['messages'] = lines
-        save_account_meta_to_disk()
+        save_user_meta_to_disk(user_id)
         context.user_data['state'] = None
-        await update.message.reply_text(f"✅ Sabhi accounts ke liye {len(lines)} Broadcast Messages set kar diye gaye hain!")
+        await update.message.reply_text(f"✅ Aapke accounts ke liye {len(lines)} Broadcast Messages set kar diye gaye hain!")
 
     elif state == 'WAITING_GLOBAL_DM':
-        for acc in USER_ACCOUNTS:
+        for acc in runtime['accounts']:
             acc['auto_reply'] = user_text
-        save_account_meta_to_disk()
+        save_user_meta_to_disk(user_id)
         context.user_data['state'] = None
-        await update.message.reply_text(f"✅ Sabhi accounts ke liye DM Auto-Reply set ho gaya:\n<code>{user_text}</code>", parse_mode="HTML")
+        await update.message.reply_text(f"✅ Aapke accounts ke liye DM Auto-Reply set ho gaya:\n<code>{user_text}</code>", parse_mode="HTML")
 
     elif state == 'WAITING_SPEED':
         try:
             val = int(user_text)
-            for acc in USER_ACCOUNTS:
+            for acc in runtime['accounts']:
                 acc['group_delay'] = val
-            save_account_meta_to_disk()
+            save_user_meta_to_disk(user_id)
             context.user_data['state'] = None
             await update.message.reply_text(f"✅ Speed (Group Delay) successfully updated to <b>{val}s</b>!", parse_mode="HTML")
         except:
@@ -710,9 +725,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif state == 'WAITING_CYCLE':
         try:
             val = int(user_text)
-            for acc in USER_ACCOUNTS:
+            for acc in runtime['accounts']:
                 acc['resend_interval'] = val
-            save_account_meta_to_disk()
+            save_user_meta_to_disk(user_id)
             context.user_data['state'] = None
             await update.message.reply_text(f"✅ Cycle Interval successfully updated to <b>{val}s</b>!", parse_mode="HTML")
         except:
@@ -721,10 +736,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     print("Loading sessions...")
     await load_saved_sessions()
-    print(f"Loaded {len(USER_ACCOUNTS)} accounts.")
+    print("All user sessions loaded successfully.")
 
 if __name__ == '__main__':
-    # Start Flask server in background thread to prevent Render timeout error
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
@@ -735,5 +749,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Master Paid Bot with Flask & Admin Panel is running...")
+    print("Isolated Multi-User Paid Bot is running...")
     app.run_polling()
