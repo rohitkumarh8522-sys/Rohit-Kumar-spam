@@ -21,7 +21,7 @@ API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789")) # Apni Telegram ID yahan dalein
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "G_KlNG") # Apna Telegram username yahan dalein
+QR_IMAGE_URL = os.environ.get("QR_IMAGE_URL", "https://i.ibb.co/6P2n865/qr_placeholder.png") # Apne QR Code ki image link yahan dalein
 
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -45,13 +45,13 @@ def run_flask():
 
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"subscriptions": {}, "users_data": {}}
+        return {"subscriptions": {}, "pending_requests": {}, "users_data": {}}
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         print(f"Error loading data: {e}")
-        return {"subscriptions": {}, "users_data": {}}
+        return {"subscriptions": {}, "pending_requests": {}, "users_data": {}}
 
 def save_data(data):
     try:
@@ -95,7 +95,7 @@ def get_user_subscription(user_id):
             return {"active": False, "expires": "Expired", "raw_expiry": expiry_time}
     return {"active": False, "expires": "No Access", "raw_expiry": None}
 
-async def check_access(update: Update):
+async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return False
@@ -105,16 +105,27 @@ async def check_access(update: Update):
         
     sub = get_user_subscription(user.id)
     if not sub["active"]:
-        keyboard = [[InlineKeyboardButton("📞 Contact Admin for Subscription", url=f"https://t.me/{ADMIN_USERNAME}")]]
+        # Show Pricing Shop Menu
+        keyboard = [
+            [InlineKeyboardButton("💎 7 Days Plan (₹X) - 2 Accounts", callback_data="buy_plan_7")],
+            [InlineKeyboardButton("💎 15 Days Plan (₹X) - 3 Accounts", callback_data="buy_plan_15")],
+            [InlineKeyboardButton("💎 30 Days Plan (₹X) - 5 Accounts", callback_data="buy_plan_30")],
+            [InlineKeyboardButton("💎 50 Days Plan (₹X) - 8 Accounts", callback_data="buy_plan_50")],
+            [InlineKeyboardButton("💎 90 Days Plan (₹X) - Unlimited", callback_data="buy_plan_90")],
+            [InlineKeyboardButton("🔄 Check Payment Status", callback_data="check_status")]
+        ]
         markup = InlineKeyboardMarkup(keyboard)
         
         msg_text = (
             "❌ <b>Subscription Required!</b>\n\n"
-            "Aapke pas is bot ko use karne ke liye active subscription nahi hai ya fir aapka time khatam ho chuka hai.\n"
-            "Subscription lene ya time badhane ke liye neeche diye gaye button par click karke Admin se contact karein:"
+            "Aapke paas active subscription nahi hai ya time khatam ho chuka hai.\n"
+            "Bot use karne ke liye neeche diye gaye plans me se koi ek plan select karein:"
         )
         if update.callback_query:
-            await update.callback_query.message.reply_text(msg_text, reply_markup=markup, parse_mode="HTML")
+            try:
+                await update.callback_query.message.edit_text(msg_text, reply_markup=markup, parse_mode="HTML")
+            except:
+                await update.callback_query.message.reply_text(msg_text, reply_markup=markup, parse_mode="HTML")
         elif update.message:
             await update.message.reply_text(msg_text, reply_markup=markup, parse_mode="HTML")
         return False
@@ -212,7 +223,7 @@ def save_user_meta_to_disk(user_id):
 # --- MAIN MENU INTERFACE ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, context):
         return
 
     sub = get_user_subscription(user.id)
@@ -297,6 +308,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Grant Access to User", callback_data="admin_grant_prompt")],
         [InlineKeyboardButton("📋 Subscriptions List", callback_data="admin_sub_list")],
+        [InlineKeyboardButton("🔔 Pending Requests", callback_data="admin_requests_list")],
         [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
     ]
     await update.message.reply_text(
@@ -324,6 +336,29 @@ async def show_subscriptions_list(query):
 
     keyboard.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="back_to_admin")])
     
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except:
+        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def show_pending_requests(query):
+    data = load_data()
+    reqs = data.get("pending_requests", {})
+    
+    keyboard = []
+    text = "🔔 <b>Pending Approval Requests:</b>\n\n"
+    
+    if not reqs:
+        text += "<i>Koi nayi request nahi hai.</i>"
+    else:
+        for uid, info in reqs.items():
+            text += f"• User ID: <code>{uid}</code> | Plan: <b>{info['days']} Days</b>\n"
+            keyboard.append([
+                InlineKeyboardButton(f"✅ Approve {uid} ({info['days']}d)", callback_data=f"approve_req_{uid}_{info['days']}"),
+                InlineKeyboardButton(f"❌ Reject", callback_data=f"reject_req_{uid}")
+            ])
+
+    keyboard.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="back_to_admin")])
     try:
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     except:
@@ -415,12 +450,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     
-    if not await check_access(update):
+    user_id = query.from_user.id
+    data = query.data
+
+    # Allow plan selection and status check without active subscription check
+    if data.startswith("buy_plan_"):
+        days = data.split("_")[2]
+        context.user_data['buying_days'] = days
+        keyboard = [[InlineKeyboardButton("🔙 Back to Plans", callback_data="back_home")]]
+        
+        await query.message.reply_photo(
+            photo=QR_IMAGE_URL,
+            caption=f"💳 <b>Payment Details ({days} Days Plan)</b>\n\n"
+                    "1. Upar diye gaye QR Code par payment karein.\n"
+                    "2. Payment karne ke baad **Payment ka Screenshot/Receipt** is chat me bhej dein.\n"
+                    "Admin ke verify karte hi aapka subscription activate ho jayega!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
         return
 
-    user_id = query.from_user.id
+    if data == "check_status":
+        sub = get_user_subscription(user_id)
+        if sub["active"]:
+            await query.message.reply_text("✅ Aapka subscription active ho chuka hai! Ab /start bhejayein.")
+        else:
+            await query.message.reply_text("⏳ Abhi aapka payment approve nahi hua hai. Kripya intezaar karein ya admin se contact karein.")
+        return
+
+    if not await check_access(update, context):
+        return
+
     runtime = get_user_runtime(user_id)
-    data = query.data
 
     if data == "start_all":
         if not runtime['accounts']:
@@ -523,12 +584,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await show_subscriptions_list(query)
 
+    elif data == "admin_requests_list":
+        if user_id != ADMIN_USER_ID:
+            return
+        await show_pending_requests(query)
+
+    elif data.startswith("approve_req_"):
+        if user_id != ADMIN_USER_ID:
+            return
+        parts = data.split("_")
+        target_uid = parts[2]
+        days = int(parts[3])
+        
+        data_json = load_data()
+        expiry = datetime.now() + timedelta(days=days)
+        data_json["subscriptions"][target_uid] = {"expires": expiry.isoformat()}
+        if target_uid in data_json.get("pending_requests", {}):
+            del data_json["pending_requests"][target_uid]
+        save_data(data_json)
+        
+        try:
+            await context.bot.send_message(chat_id=int(target_uid), text="🎉 Aapka subscription approve ho gaya hai! Ab /start bhej kar bot use karein.")
+        except:
+            pass
+            
+        await query.answer("✅ Request Approved!", show_alert=True)
+        await show_pending_requests(query)
+
+    elif data.startswith("reject_req_"):
+        if user_id != ADMIN_USER_ID:
+            return
+        target_uid = data.split("_")[2]
+        data_json = load_data()
+        if target_uid in data_json.get("pending_requests", {}):
+            del data_json["pending_requests"][target_uid]
+            save_data(data_json)
+        await query.answer("❌ Request Rejected!", show_alert=True)
+        await show_pending_requests(query)
+
     elif data == "back_to_admin":
         if user_id != ADMIN_USER_ID:
             return
         keyboard = [
             [InlineKeyboardButton("➕ Grant Access to User", callback_data="admin_grant_prompt")],
             [InlineKeyboardButton("📋 Subscriptions List", callback_data="admin_sub_list")],
+            [InlineKeyboardButton("🔔 Pending Requests", callback_data="admin_requests_list")],
             [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
         ]
         await query.message.edit_text(
@@ -591,203 +691,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_home":
         await start(update, context)
 
-# --- TEXT HANDLER WITH AUTO-DELETE & RETURN TO MENU ---
+# --- TEXT HANDLER WITH AUTO-DELETE & PAYMENT PROOF SUBMISSION ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not context.user_data:
+    if not update.message:
         return
         
     user = update.effective_user
-    if user.id != ADMIN_USER_ID and not await check_access(update):
-        return
-
     user_id = user.id
-    runtime = get_user_runtime(user_id)
-    state = context.user_data.get('state')
-    user_text = update.message.text.strip() if update.message.text else ""
-
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-    if state == 'WAITING_ADMIN_GRANT' and user_id == ADMIN_USER_ID:
-        context.user_data['state'] = None
+    
+    # Check if user is sending payment proof screenshot description or text
+    buying_days = context.user_data.get('buying_days')
+    if buying_days and not get_user_subscription(user_id)["active"]:
         try:
-            parts = user_text.split()
-            target_id = parts[0]
-            days = int(parts[1])
-            
-            data = load_data()
-            expiry = datetime.now() + timedelta(days=days)
-            data["subscriptions"][target_id] = {"expires": expiry.isoformat()}
-            save_data(data)
-            
-            await update.message.reply_text(f"✅ Success! User ID <code>{target_id}</code> ko {days} din ka access de diya gaya hai.", parse_mode="HTML")
-        except Exception:
-            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>123456789 30</code>", parse_mode="HTML")
-        return
-
-    if state == 'WAITING_PHONE':
-        phone_num = user_text
-        context.user_data['phone'] = phone_num
-        s_path = os.path.join(SESSION_DIR, f"user_{user_id}_phone_{int(asyncio.get_event_loop().time())}")
-        client = TelegramClient(s_path, API_ID, API_HASH)
-        await client.connect()
-        try:
-            sent = await client.send_code_request(phone_num)
-            context.user_data['phone_client'] = client
-            context.user_data['phone_hash'] = sent.phone_code_hash
-            context.user_data['state'] = 'WAITING_PHONE_CODE'
-            await update.message.reply_text("📨 Telegram OTP code bhej diya gaya hai. Code yahan enter karein:")
-        except Exception as e:
-            await client.disconnect()
-            await update.message.reply_text(f"❌ Error: {e}")
-            context.user_data['state'] = None
-        return
-
-    elif state == 'WAITING_PHONE_CODE':
-        code = user_text
-        client = context.user_data.get('phone_client')
-        phone_num = context.user_data.get('phone')
-        phone_hash = context.user_data.get('phone_hash')
-        try:
-            await client.sign_in(phone_num, code, phone_code_hash=phone_hash)
-            me = await client.get_me()
-            phone = f"+{me.phone}" if me and me.phone else phone_num
-            
-            await client(UpdateStatusRequest(offline=False))
-            asyncio.create_task(keep_client_alive(client))
-            
-            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
-            setup_dm_handler(client, acc_dict)
-            runtime['accounts'].append(acc_dict)
-            save_user_meta_to_disk(user_id)
-            context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya!", parse_mode="HTML")
-            await start(update, context)
-        except SessionPasswordNeededError:
-            context.user_data['state'] = 'WAITING_PHONE_PASSWORD'
-            await update.message.reply_text("🔒 2-Step Verification password enter karein:")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
-            await client.disconnect()
-            context.user_data['state'] = None
-        return
-
-    elif state == 'WAITING_PHONE_PASSWORD':
-        password = user_text
-        client = context.user_data.get('phone_client')
-        phone_num = context.user_data.get('phone')
-        try:
-            await client.sign_in(password=password)
-            me = await client.get_me()
-            phone = f"+{me.phone}" if me and me.phone else phone_num
-            
-            await client(UpdateStatusRequest(offline=False))
-            asyncio.create_task(keep_client_alive(client))
-            
-            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
-            setup_dm_handler(client, acc_dict)
-            runtime['accounts'].append(acc_dict)
-            save_user_meta_to_disk(user_id)
-            context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
-            await start(update, context)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
-            await client.disconnect()
-            context.user_data['state'] = None
-        return
-
-    elif state == 'WAITING_STRING_SESSION':
-        string_session = user_text
-        s_path = os.path.join(SESSION_DIR, f"user_{user_id}_str_{int(asyncio.get_event_loop().time())}")
-        client = TelegramClient(StringSession(string_session), API_ID, API_HASH)
-        try:
-            await client.connect()
-            if await client.is_user_authorized():
-                me = await client.get_me()
-                phone = f"+{me.phone}" if me and me.phone else f"Session_{user_id}"
-                
-                with open(f"{s_path}.session", "w") as f:
-                    f.write(client.session.save())
-                
-                asyncio.create_task(keep_client_alive(client))
-                acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': [], 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
-                setup_dm_handler(client, acc_dict)
-                runtime['accounts'].append(acc_dict)
-                save_user_meta_to_disk(user_id)
-                context.user_data['state'] = None
-                await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> added!", parse_mode="HTML")
-                await start(update, context)
-            else:
-                await update.message.reply_text("❌ Invalid Session String!")
-                context.user_data['state'] = None
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
-            context.user_data['state'] = None
-        return
-
-    elif state == 'WAITING_GLOBAL_MSG':
-        lines = [l.strip() for l in user_text.split('\n') if l.strip()]
-        for acc in runtime['accounts']:
-            acc['messages'] = lines
-        save_user_meta_to_disk(user_id)
-        context.user_data['state'] = None
-        await update.message.reply_text(f"✅ Aapke accounts ke liye {len(lines)} Broadcast Messages set kar diye gaye hain!")
-        await start(update, context)
-        return
-
-    elif state == 'WAITING_GLOBAL_DM':
-        for acc in runtime['accounts']:
-            acc['auto_reply'] = user_text
-        save_user_meta_to_disk(user_id)
-        context.user_data['state'] = None
-        await update.message.reply_text(f"✅ Aapke accounts ke liye DM Auto-Reply set ho gaya:\n<code>{user_text}</code>", parse_mode="HTML")
-        await start(update, context)
-        return
-
-    elif state == 'WAITING_SPEED':
-        try:
-            val = int(user_text)
-            for acc in runtime['accounts']:
-                acc['group_delay'] = val
-            save_user_meta_to_disk(user_id)
-            context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Speed successfully updated to <b>{val}s</b>!", parse_mode="HTML")
-            await start(update, context)
+            await update.message.delete()
         except:
-            await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 3)")
-        return
-
-    elif state == 'WAITING_CYCLE':
+            pass
+            
+        data = load_data()
+        if "pending_requests" not in data:
+            data["pending_requests"] = {}
+        data["pending_requests"][str(user_id)] = {"days": int(buying_days), "time": datetime.now().isoformat()}
+        save_data(data)
+        
+        context.user_data['buying_days'] = None
+        await update.message.reply_text("✅ Aapka payment proof bhej diya gaya hai! Admin ke verify karne par approval mil jayegi.")
+        
+        # Notify Admin
         try:
-            val = int(user_text)
-            for acc in runtime['accounts']:
-                acc['resend_interval'] = val
-            save_user_meta_to_disk(user_id)
-            context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Cycle Interval successfully updated to <b>{val}s</b>!", parse_mode="HTML")
-            await start(update, context)
-        except:
-            await update.message.reply_text("❌ Sahi numeric value dalein (e.g., 60)")
-        return
-
-async def post_init(application):
-    print("Loading sessions...")
-    await load_saved_sessions()
-    print("All user sessions loaded successfully.")
-
-if __name__ == '__main__':
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    print("Master Subscription Bot is running...")
-    app.run_polling()
