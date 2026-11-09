@@ -17,7 +17,8 @@ from telethon.tl.functions.users import GetFullUserRequest
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789"))
+
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "123456789")) # Apni Telegram ID yahan dalein
 
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -39,38 +40,14 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port)
 
 def load_data():
-    default_plans = {
-        "7": {"days": 7, "price": "99", "accounts": 2},
-        "15": {"days": 15, "price": "179", "accounts": 3},
-        "30": {"days": 30, "price": "299", "accounts": 5},
-        "50": {"days": 50, "price": "449", "accounts": 8},
-        "90": {"days": 90, "price": "799", "accounts": 15}
-    }
     if not os.path.exists(DATA_FILE):
-        return {
-            "subscriptions": {}, 
-            "pending_requests": {}, 
-            "users_data": {}, 
-            "qr_url": "https://i.ibb.co/6P2n865/qr_placeholder.png",
-            "plans": default_plans
-        }
+        return {"subscriptions": {}, "users_data": {}}
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "plans" not in data:
-                data["plans"] = default_plans
-            if "qr_url" not in data:
-                data["qr_url"] = "https://i.ibb.co/6P2n865/qr_placeholder.png"
-            return data
+            return json.load(f)
     except Exception as e:
         print(f"Error loading data: {e}")
-        return {
-            "subscriptions": {}, 
-            "pending_requests": {}, 
-            "users_data": {}, 
-            "qr_url": "https://i.ibb.co/6P2n865/qr_placeholder.png",
-            "plans": default_plans
-        }
+        return {"subscriptions": {}, "users_data": {}}
 
 def save_data(data):
     try:
@@ -124,27 +101,18 @@ async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     sub = get_user_subscription(user.id)
     if not sub["active"]:
-        data = load_data()
-        plans = data.get("plans", {})
-        
-        keyboard = []
-        for key, p in plans.items():
-            keyboard.append([InlineKeyboardButton(f"💎 {p['days']} Days | ₹{p['price']} | {p['accounts']} Accounts", callback_data=f"buy_plan_{key}")])
-        keyboard.append([InlineKeyboardButton("🔄 Check Payment Approval Status", callback_data="check_status")])
-        
-        markup = InlineKeyboardMarkup(keyboard)
         msg_text = (
-            "🛒 <b>Bot Subscription Shop</b>\n\n"
-            "Aapke paas active subscription nahi hai ya time khatam ho chuka hai.\n"
-            "Bot use karne ke liye neeche diye gaye plans me se koi ek plan select karein:"
+            "❌ <b>Access Denied!</b>\n\n"
+            "Aapke paas is bot ko use karne ka access nahi hai ya aapka time khatam ho chuka hai.\n"
+            "Access lene ke liye Admin se contact karein."
         )
         if update.callback_query:
             try:
-                await update.callback_query.message.edit_text(msg_text, reply_markup=markup, parse_mode="HTML")
+                await update.callback_query.message.edit_text(msg_text, parse_mode="HTML")
             except:
-                await update.callback_query.message.reply_text(msg_text, reply_markup=markup, parse_mode="HTML")
+                await update.callback_query.message.reply_text(msg_text, parse_mode="HTML")
         elif update.message:
-            await update.message.reply_text(msg_text, reply_markup=markup, parse_mode="HTML")
+            await update.message.reply_text(msg_text, parse_mode="HTML")
         return False
     return True
 
@@ -325,8 +293,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Grant Access to User", callback_data="admin_grant_prompt")],
         [InlineKeyboardButton("📋 Subscriptions List", callback_data="admin_sub_list")],
-        [InlineKeyboardButton("🔔 Pending Requests", callback_data="admin_requests_list")],
-        [InlineKeyboardButton("⚙️ Edit Shop Plans & QR", callback_data="admin_shop_settings")],
         [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
     ]
     await update.message.reply_text(
@@ -335,31 +301,15 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-async def show_shop_settings(query):
-    data = load_data()
-    qr_url = data.get("qr_url", "")
-    plans = data.get("plans", {})
-    
-    text = f"⚙️ <b>Shop & QR Settings</b>\n\n📌 <b>Current QR Image URL:</b>\n<code>{qr_url}</code>\n\n💎 <b>Configured Plans:</b>\n"
-    for k, p in plans.items():
-        text += f"• {p['days']} Days | ₹{p['price']} | {p['accounts']} Accounts\n"
-        
-    keyboard = [
-        [InlineKeyboardButton("🖼 Change QR Code URL", callback_data="admin_set_qr")],
-        [InlineKeyboardButton("✏️ Edit Plan Details", callback_data="admin_edit_plans")],
-        [InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="back_to_admin")]
-    ]
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-
 async def show_subscriptions_list(query):
     data = load_data()
     subs = data.get("subscriptions", {})
     
     keyboard = []
-    text = "📋 <b>Active Subscriptions List:</b>\n\n"
+    text = "📋 <b>Active Access List:</b>\n\n"
     
     if not subs:
-        text += "<i>Koi bhi paid user abhi active nahi hai.</i>"
+        text += "<i>Koi bhi user abhi active nahi hai.</i>"
     else:
         for uid, info in subs.items():
             exp = datetime.fromisoformat(info["expires"])
@@ -370,29 +320,6 @@ async def show_subscriptions_list(query):
 
     keyboard.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="back_to_admin")])
     
-    try:
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-    except:
-        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-
-async def show_pending_requests(query):
-    data = load_data()
-    reqs = data.get("pending_requests", {})
-    
-    keyboard = []
-    text = "🔔 <b>Pending Approval Requests:</b>\n\n"
-    
-    if not reqs:
-        text += "<i>Koi nayi request nahi hai.</i>"
-    else:
-        for uid, info in reqs.items():
-            text += f"• User ID: <code>{uid}</code> | Plan: <b>{info['days']} Days</b>\n"
-            keyboard.append([
-                InlineKeyboardButton(f"✅ Approve {uid} ({info['days']}d)", callback_data=f"approve_req_{uid}_{info['days']}"),
-                InlineKeyboardButton(f"❌ Reject", callback_data=f"reject_req_{uid}")
-            ])
-
-    keyboard.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="back_to_admin")])
     try:
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     except:
@@ -487,35 +414,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    if data.startswith("buy_plan_"):
-        plan_key = data.split("_")[2]
-        db_data = load_data()
-        plans = db_data.get("plans", {})
-        plan_info = plans.get(plan_key, {"days": plan_key, "price": "X", "accounts": "X"})
-        
-        context.user_data['buying_days'] = str(plan_info['days'])
-        keyboard = [[InlineKeyboardButton("🔙 Back to Plans", callback_data="back_home")]]
-        
-        qr_url = db_data.get("qr_url", "https://i.ibb.co/6P2n865/qr_placeholder.png")
-        await query.message.reply_photo(
-            photo=qr_url,
-            caption=f"💳 <b>Payment Details ({plan_info['days']} Days Plan - ₹{plan_info['price']})</b>\n\n"
-                    "1. Upar diye gaye QR Code par payment karein.\n"
-                    "2. Payment karne ke baad **Payment ka Screenshot ya Transaction ID** is chat me bhej dein.\n"
-                    "Admin ke verify karte hi aapka subscription activate ho jayega!",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="HTML"
-        )
-        return
-
-    if data == "check_status":
-        sub = get_user_subscription(user_id)
-        if sub["active"]:
-            await query.message.reply_text("✅ Aapka subscription active ho chuka hai! Ab /start bhejayein.")
-        else:
-            await query.message.reply_text("⏳ Abhi aapka payment approve nahi hua hai. Kripya intezaar karein.")
-        return
-
     if not await check_access(update, context):
         return
 
@@ -607,28 +505,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await delete_account_menu(query, user_id, page=0)
 
     # --- ADMIN CALLBACKS ---
-    elif data == "admin_shop_settings":
-        if user_id != ADMIN_USER_ID:
-            return
-        await show_shop_settings(query)
-
-    elif data == "admin_set_qr":
-        if user_id != ADMIN_USER_ID:
-            return
-        context.user_data['state'] = 'WAITING_NEW_QR'
-        await query.message.reply_text("🖼 Naye QR Code ki Image URL (direct link) bhejayein:")
-
-    elif data == "admin_edit_plans":
-        if user_id != ADMIN_USER_ID:
-            return
-        context.user_data['state'] = 'WAITING_EDIT_PLAN'
-        await query.message.reply_text(
-            "✏️ Plan edit karne ke liye is format me bhejayein:\n"
-            "<code>[PlanKey] [Days] [Price] [Accounts]</code>\n"
-            "Example: <code>7 7 99 2</code> (Matlab 7 key wala plan, 7 days, ₹99, 2 accounts)",
-            parse_mode="HTML"
-        )
-
     elif data == "admin_grant_prompt":
         if user_id != ADMIN_USER_ID:
             return
@@ -644,56 +520,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await show_subscriptions_list(query)
 
-    elif data == "admin_requests_list":
-        if user_id != ADMIN_USER_ID:
-            return
-        await show_pending_requests(query)
-
-    elif data.startswith("approve_req_"):
-        if user_id != ADMIN_USER_ID:
-            return
-        parts = data.split("_")
-        target_uid = parts[2]
-        days = int(parts[3])
-        
-        data_json = load_data()
-        expiry = datetime.now() + timedelta(days=days)
-        data_json["subscriptions"][target_uid] = {"expires": expiry.isoformat()}
-        if target_uid in data_json.get("pending_requests", {}):
-            del data_json["pending_requests"][target_uid]
-        save_data(data_json)
-        
-        try:
-            await context.bot.send_message(chat_id=int(target_uid), text="🎉 Aapka payment approve ho gaya aur subscription activate ho gaya! Ab /start bhej kar bot use karein.")
-        except:
-            pass
-            
-        await query.answer("✅ Request Approved!", show_alert=True)
-        await show_pending_requests(query)
-
-    elif data.startswith("reject_req_"):
-        if user_id != ADMIN_USER_ID:
-            return
-        target_uid = data.split("_")[2]
-        data_json = load_data()
-        if target_uid in data_json.get("pending_requests", {}):
-            del data_json["pending_requests"][target_uid]
-            save_data(data_json)
-        try:
-            await context.bot.send_message(chat_id=int(target_uid), text="❌ Aapka payment reject kar diya gaya hai. Kripya sahi payment karein.")
-        except:
-            pass
-        await query.answer("❌ Request Rejected!", show_alert=True)
-        await show_pending_requests(query)
-
     elif data == "back_to_admin":
         if user_id != ADMIN_USER_ID:
             return
         keyboard = [
             [InlineKeyboardButton("➕ Grant Access to User", callback_data="admin_grant_prompt")],
             [InlineKeyboardButton("📋 Subscriptions List", callback_data="admin_sub_list")],
-            [InlineKeyboardButton("🔔 Pending Requests", callback_data="admin_requests_list")],
-            [InlineKeyboardButton("⚙️ Edit Shop Plans & QR", callback_data="admin_shop_settings")],
             [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
         ]
         await query.message.edit_text(
@@ -756,46 +588,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_home":
         await start(update, context)
 
-# --- TEXT HANDLER WITH ADMIN SHOP SETTINGS & AUTO-DELETE ---
+# --- TEXT HANDLER WITH AUTO-DELETE & DIRECT ADMIN GRANT ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
         
     user = update.effective_user
     user_id = user.id
-    
-    buying_days = context.user_data.get('buying_days')
-    if buying_days and not get_user_subscription(user_id)["active"]:
-        try:
-            await update.message.delete()
-        except:
-            pass
-            
-        data = load_data()
-        if "pending_requests" not in data:
-            data["pending_requests"] = {}
-        data["pending_requests"][str(user_id)] = {"days": int(buying_days), "time": datetime.now().isoformat()}
-        save_data(data)
-        
-        context.user_data['buying_days'] = None
-        await update.message.reply_text("✅ Aapka payment proof bhej diya gaya hai! Admin ke verify karne par approval mil jayegi.")
-        
-        try:
-            keyboard = [
-                [
-                    InlineKeyboardButton(f"✅ Approve ({buying_days}d)", callback_data=f"approve_req_{user_id}_{buying_days}"),
-                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_req_{user_id}")
-                ]
-            ]
-            await context.bot.send_message(
-                chat_id=ADMIN_USER_ID,
-                text=f"🔔 <b>New Payment Request!</b>\nUser ID: <code>{user_id}</code>\nPlan: <b>{buying_days} Days</b>",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="HTML"
-            )
-        except:
-            pass
-        return
 
     if user_id != ADMIN_USER_ID and not await check_access(update, context):
         return
@@ -808,33 +607,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.delete()
     except Exception:
         pass
-
-    if state == 'WAITING_NEW_QR' and user_id == ADMIN_USER_ID:
-        context.user_data['state'] = None
-        data = load_data()
-        data["qr_url"] = user_text
-        save_data(data)
-        await update.message.reply_text("✅ QR Code URL successfully update kar diya gaya hai!")
-        return
-
-    if state == 'WAITING_EDIT_PLAN' and user_id == ADMIN_USER_ID:
-        context.user_data['state'] = None
-        try:
-            parts = user_text.split()
-            key = parts[0]
-            days = int(parts[1])
-            price = parts[2]
-            accounts = int(parts[3])
-            
-            data = load_data()
-            if "plans" not in data:
-                data["plans"] = {}
-            data["plans"][key] = {"days": days, "price": price, "accounts": accounts}
-            save_data(data)
-            await update.message.reply_text(f"✅ Plan '{key}' successfully update ho gaya!")
-        except Exception:
-            await update.message.reply_text("❌ Sahi format me dalein. Example: <code>7 7 99 2</code>", parse_mode="HTML")
-        return
 
     if state == 'WAITING_ADMIN_GRANT' and user_id == ADMIN_USER_ID:
         context.user_data['state'] = None
@@ -849,6 +621,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_data(data)
             
             await update.message.reply_text(f"✅ Success! User ID <code>{target_id}</code> ko {days} din ka access de diya gaya hai.", parse_mode="HTML")
+            try:
+                await context.bot.send_message(chat_id=int(target_id), text=f"🎉 Aapko {days} din ka access mil gaya hai! Ab /start bhej kar bot use karein.")
+            except:
+                pass
         except Exception:
             await update.message.reply_text("❌ Sahi format me dalein. Example: <code>123456789 30</code>", parse_mode="HTML")
         return
@@ -1015,5 +791,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Master Dynamic Shop Bot is running...")
+    print("Master Direct Access Bot is running...")
     app.run_polling()
