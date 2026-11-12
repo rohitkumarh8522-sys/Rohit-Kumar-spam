@@ -185,6 +185,7 @@ async def load_saved_sessions():
                             setup_dm_handler(client, acc_dict)
                             runtime['accounts'].append(acc_dict)
                             
+                            # Ensure background task only starts if explicitly running in saved meta
                             if runtime['is_running']:
                                 asyncio.create_task(broadcast_for_user(owner_id))
                     else:
@@ -477,7 +478,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_meta_to_disk(user_id)
         asyncio.create_task(broadcast_for_user(user_id))
         
-        # Checking account authorization and health status dynamically
         status_text = "🚀 <b>Broadcast Triggered & Active!</b>\n\n"
         for acc in runtime['accounts']:
             client = acc['client']
