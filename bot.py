@@ -185,7 +185,6 @@ async def load_saved_sessions():
                             setup_dm_handler(client, acc_dict)
                             runtime['accounts'].append(acc_dict)
                             
-                            # Ensure background task only starts if explicitly running in saved meta
                             if runtime['is_running']:
                                 asyncio.create_task(broadcast_for_user(owner_id))
                     else:
@@ -225,7 +224,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_left = sub["expires"]
     
     runtime = get_user_runtime(user.id)
-    active_count = sum(1 for acc in runtime['accounts'] if acc['active'])
+    # Correctly show running count as 0 if stopped, else count active accounts
+    active_count = sum(1 for acc in runtime['accounts'] if acc['active']) if runtime['is_running'] else 0
     
     speed_str = "2-5s"
     cycle_str = "60s"
@@ -475,6 +475,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
          
         runtime['is_running'] = True
+        runtime['total_sent'] = 0  # Reset message count to zero on fresh start
         save_user_meta_to_disk(user_id)
         asyncio.create_task(broadcast_for_user(user_id))
         
