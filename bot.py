@@ -214,7 +214,7 @@ def save_user_meta_to_disk(user_id):
     data["users_data"][str(user_id)]['is_running'] = runtime['is_running']
     save_data(data)
 
-# --- MAIN MENU INTERFACE (Matching Screenshot 1000041012.jpg) ---
+# --- MAIN MENU INTERFACE ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not await check_access(update, context):
@@ -274,7 +274,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
-# --- SETTINGS MENU (Without Schedule option) ---
+# --- SETTINGS MENU ---
 async def settings_menu(query):
     keyboard = [
         [InlineKeyboardButton("📊 Detailed Account Status", callback_data="acc_status_detail")],
@@ -456,19 +456,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "start_all":
         if not runtime['accounts']:
-            await query.message.reply_text("❌ Pehle kam se kam apna 1 account login karein!")
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]
+            await query.message.edit_text(
+                "❌ <b>Pehle kam se kam apna 1 account login karein!</b>",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
             return
+
         if not any(acc['messages'] for acc in runtime['accounts']):
-            await query.message.reply_text("❌ Aapke kisi bhi account me broadcast messages set nahi hain! Settings me jaakar set karein.")
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]
+            await query.message.edit_text(
+                "❌ <b>Aapke kisi bhi account me broadcast messages set nahi hain!</b>\nSettings me jaakar set karein.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
             return
          
         runtime['is_running'] = True
         save_user_meta_to_disk(user_id)
         asyncio.create_task(broadcast_for_user(user_id))
         
-        status_text = "🟢 <b>Bot Started Successfully!</b>\n\n"
+        # Checking account authorization and health status dynamically
+        status_text = "🚀 <b>Broadcast Triggered & Active!</b>\n\n"
         for acc in runtime['accounts']:
-            status_text += f"🟢 Started: {acc.get('name', acc['phone'])}\n"
+            client = acc['client']
+            try:
+                if client.is_connected() and await client.is_user_authorized():
+                    status_text += f"✅ Already running: {acc.get('name', acc['phone'])}\n"
+                else:
+                    status_text += f"❌ Failed: {acc.get('name', acc['phone'])} (Session Revoked/Disconnected)\n"
+            except Exception as e:
+                status_text += f"❌ Failed: {acc.get('name', acc['phone'])} ({e})\n"
         
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]
         await query.message.edit_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
