@@ -179,7 +179,8 @@ async def load_saved_sessions():
                                 'messages': acc_msgs,
                                 'group_delay': meta.get('group_delay', 2),
                                 'resend_interval': meta.get('resend_interval', 60),
-                                'auto_reply': meta.get('auto_reply', '')
+                                'auto_reply': meta.get('auto_reply', ''),
+                                'name': me.first_name if me and me.first_name else phone
                             }
                             setup_dm_handler(client, acc_dict)
                             runtime['accounts'].append(acc_dict)
@@ -213,7 +214,7 @@ def save_user_meta_to_disk(user_id):
     data["users_data"][str(user_id)]['is_running'] = runtime['is_running']
     save_data(data)
 
-# --- MAIN MENU INTERFACE ---
+# --- MAIN MENU INTERFACE (Matching Screenshot 1000041012.jpg) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not await check_access(update, context):
@@ -223,10 +224,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_left = sub["expires"]
     
     runtime = get_user_runtime(user.id)
-    status_str = "▶️ RUNNING" if runtime['is_running'] else "⏹ STOPPED"
     active_count = sum(1 for acc in runtime['accounts'] if acc['active'])
     
-    speed_str = "2s"
+    speed_str = "2-5s"
     cycle_str = "60s"
     if runtime['accounts']:
         speed_str = f"{runtime['accounts'][0].get('group_delay', 2)}s"
@@ -234,10 +234,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "✨ <b>Master Control Bot</b> ✨\n"
-        f"📊 <b>Status:</b> {status_str}\n"
-        f"👤 <b>User Panel</b> | ⏳ <b>Time:</b> {time_left}\n\n"
+        "👤 <b>User Panel</b>\n"
+        f"⏳ <b>Time:</b> {time_left}\n\n"
         f"📊 <b>Accounts:</b> {len(runtime['accounts'])} (Running: {active_count})\n"
         f"📨 <b>Messages Sent:</b> {runtime['total_sent']}\n"
+        f"⏱ <b>Schedule:</b> Not Set (Immediate)\n"
         f"⚡ <b>Speed:</b> {speed_str} | 🔄 <b>Cycle:</b> {cycle_str}"
     )
 
@@ -245,6 +246,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("▶️ Start All", callback_data="start_all"),
             InlineKeyboardButton("⏹ Stop All", callback_data="stop_all")
+        ],
+        [
+            InlineKeyboardButton("⏰ Schedule Broadcast", callback_data="schedule_msg_menu")
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="settings_menu")
@@ -270,26 +274,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
-# --- SETTINGS MENU ---
+# --- SETTINGS MENU (Without Schedule option) ---
 async def settings_menu(query):
     keyboard = [
-        [InlineKeyboardButton("📝 Set Broadcast Messages (10+ Msgs)", callback_data="set_broadcast_msg")],
-        [InlineKeyboardButton("🤖 Set DM Auto-Reply", callback_data="set_dm_msg")],
-        [InlineKeyboardButton("⚡ Set Speed (Group Delay)", callback_data="set_speed_timer")],
-        [InlineKeyboardButton("🔄 Set Cycle Interval", callback_data="set_cycle_timer")],
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]
+        [InlineKeyboardButton("📊 Detailed Account Status", callback_data="acc_status_detail")],
+        [InlineKeyboardButton("💬 Auto-PM Config", callback_data="set_dm_msg")],
+        [InlineKeyboardButton("⏱ Speeds & Delays", callback_data="speeds_menu")],
+        [InlineKeyboardButton("📝 Auto Bio", callback_data="auto_bio_menu")],
+        [InlineKeyboardButton("👥 Group Joiner", callback_data="group_joiner_menu")],
+        [InlineKeyboardButton("📢 Broadcast Messages", callback_data="broadcast_menu")],
+        [InlineKeyboardButton("⚙️ Special Acc Config", callback_data="special_acc_menu")],
+        [InlineKeyboardButton("🔙 Back to Main", callback_data="back_home")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     try:
         await query.message.edit_text(
-            "⚙️ <b>Settings</b>\n\nYahan se aap apne broadcast messages (10+ multiple messages), DM auto-reply, speed aur cycle timers configure kar sakte hain:",
+            "⚙️ <b>Settings Menu</b>\n\nNeeche diye gaye options me se select karein:",
             reply_markup=markup, parse_mode="HTML"
         )
     except:
         await query.message.reply_text(
-            "⚙️ <b>Settings</b>\n\nYahan se aap apne broadcast messages (10+ multiple messages), DM auto-reply, speed aur cycle timers configure kar sakte hain:",
+            "⚙️ <b>Settings Menu</b>\n\nNeeche diye gaye options me se select karein:",
             reply_markup=markup, parse_mode="HTML"
         )
+
+# --- BROADCAST MESSAGES MENU ---
+async def show_broadcast_menu(query, user_id):
+    data = load_data()
+    global_msgs = data.get("global_messages", [])
+    
+    keyboard = []
+    for idx, msg in enumerate(global_msgs):
+        short_msg = msg[:25] + "..." if len(msg) > 25 else msg
+        keyboard.append([InlineKeyboardButton(f"❌ Msg #{idx+1}: {short_msg}", callback_data=f"del_bmsg_{idx}")])
+        
+    keyboard.append([InlineKeyboardButton("➕ Add Message", callback_data="add_bmsg_prompt")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="settings_menu")])
+    
+    markup = InlineKeyboardMarkup(keyboard)
+    text = "📢 <b>Broadcast Messages</b>\n\nAapke configured messages neeche hain:"
+    try:
+        await query.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except:
+        await query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 # --- ADMIN PANEL ---
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -435,54 +462,96 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Aapke kisi bhi account me broadcast messages set nahi hain! Settings me jaakar set karein.")
             return
          
-        if not runtime['is_running']:
-            runtime['total_sent'] = 0
-            runtime['is_running'] = True
-            save_user_meta_to_disk(user_id)
-            asyncio.create_task(broadcast_for_user(user_id))
-            await query.message.reply_text("✅ Aapka broadcast start kar diya gaya hai!")
-            await start(update, context)
-        else:
-            await query.message.reply_text("⚠️ Aapka broadcast pehle se running hai!")
+        runtime['is_running'] = True
+        save_user_meta_to_disk(user_id)
+        asyncio.create_task(broadcast_for_user(user_id))
+        
+        status_text = "🟢 <b>Bot Started Successfully!</b>\n\n"
+        for acc in runtime['accounts']:
+            status_text += f"🟢 Started: {acc.get('name', acc['phone'])}\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]
+        await query.message.edit_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
     elif data == "stop_all":
         runtime['is_running'] = False
         save_user_meta_to_disk(user_id)
-        await query.message.reply_text("⏹ Aapke broadcasts stop kar diye gaye hain.")
-        await start(update, context)
+        
+        status_text = "⏹ <b>Broadcast Stopped</b>\n\n"
+        for acc in runtime['accounts']:
+            status_text += f"🔴 Stopped: {acc.get('name', acc['phone'])}\n"
+            
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]
+        await query.message.edit_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
     elif data == "settings_menu":
         await settings_menu(query)
 
-    elif data == "set_broadcast_msg":
-        context.user_data['state'] = 'WAITING_GLOBAL_MSG'
-        await query.message.reply_text(
-            "📝 **Set 10+ Broadcast Messages**\n\n"
-            "Aap apne multiple messages (10+ ya jitne marzi) yahan bhej sakte hain.\n"
-            "Har nayi line (New Line) ek naya message ban jayegi, aur bot rotation me naye-naye messages bhejega:\n\n"
-            "<i>(Aap account login hone se pehle ya baad me kabhi bhi set kar sakte hain!)</i>",
-            parse_mode="HTML"
+    elif data == "broadcast_menu":
+        await show_broadcast_menu(query, user_id)
+
+    elif data == "add_bmsg_prompt":
+        context.user_data['state'] = 'WAITING_ADD_BMSG'
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="broadcast_menu")]]
+        await query.message.edit_text(
+            "📝 Naya Broadcast Message yahan bhejayein (Aap multiple lines me bhi bhej sakte hain):",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
         )
+
+    elif data.startswith("del_bmsg_"):
+        idx = int(data.split("_")[2])
+        db_data = load_data()
+        global_msgs = db_data.get("global_messages", [])
+        if idx < len(global_msgs):
+            removed = global_msgs.pop(idx)
+            db_data["global_messages"] = global_msgs
+            save_data(db_data)
+            
+            for acc in runtime['accounts']:
+                acc['messages'] = global_msgs
+            save_user_meta_to_disk(user_id)
+            
+            await query.answer(f"🗑 Message #{idx+1} deleted!", show_alert=True)
+        await show_broadcast_menu(query, user_id)
+
+    elif data == "acc_status_detail":
+        text = "📊 <b>Detailed Account Status</b>\n\n"
+        if not runtime['accounts']:
+            text += "<i>Koi account login nahi hai.</i>"
+        else:
+            for idx, acc in enumerate(runtime['accounts']):
+                status_icon = "🟢 Active" if acc['active'] else "🔴 Inactive"
+                text += f"{idx+1}. 📱 <b>{acc['phone']}</b> ({acc.get('name', 'User')}) - {status_icon}\n"
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="settings_menu")]]
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+    elif data == "speeds_menu":
+        context.user_data['state'] = 'WAITING_SPEED'
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="settings_menu")]]
+        await query.message.edit_text("⏱ Speeds (Group Delay) seconds me bhejayein (jaise <code>3</code>):", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+    elif data == "schedule_msg_menu":
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]
+        await query.message.edit_text("⏰ <b>Schedule Broadcast</b> feature jald hi update hoga!", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+    elif data in ["auto_bio_menu", "group_joiner_menu", "special_acc_menu"]:
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="settings_menu")]]
+        await query.message.edit_text("⚙️ Is module par kaam chal raha hai, jald live hoga!", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
     elif data == "set_dm_msg":
         context.user_data['state'] = 'WAITING_GLOBAL_DM'
-        await query.message.reply_text("🤖 Aapke accounts ke liye **DM Auto-Reply** message bhejayein:", parse_mode="HTML")
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="settings_menu")]]
+        await query.message.edit_text("🤖 Aapke accounts ke liye **DM Auto-Reply** message bhejayein:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
     elif data == "set_speed_timer":
         context.user_data['state'] = 'WAITING_SPEED'
-        await query.message.reply_text(
-            "⚡ **Speed (Group Delay) Set Karein**\n"
-            "Seconds me value bhejayein (e.g., <code>3</code> matlab har message ke beech 3 seconds ka gap):",
-            parse_mode="HTML"
-        )
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="settings_menu")]]
+        await query.message.edit_text("⚡ Seconds me speed value bhejayein (e.g., <code>3</code>):", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
     elif data == "set_cycle_timer":
         context.user_data['state'] = 'WAITING_CYCLE'
-        await query.message.reply_text(
-            "🔄 **Cycle Interval Set Karein**\n"
-            "Seconds me value bhejayein (e.g., <code>60</code> matlab har 60 seconds baad pura cycle repeat hoga):",
-            parse_mode="HTML"
-        )
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="settings_menu")]]
+        await query.message.edit_text("🔄 Cycle interval seconds me bhejayein (e.g., <code>60</code>):", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
     elif data == "login_phone":
         context.user_data['state'] = 'WAITING_PHONE'
@@ -618,6 +687,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    if state == 'WAITING_ADD_BMSG':
+        lines = [l.strip() for l in user_text.split('\n') if l.strip()]
+        db_data = load_data()
+        if "global_messages" not in db_data:
+            db_data["global_messages"] = []
+        db_data["global_messages"].extend(lines)
+        save_data(db_data)
+        
+        for acc in runtime['accounts']:
+            acc['messages'] = db_data["global_messages"]
+        save_user_meta_to_disk(user_id)
+        
+        context.user_data['state'] = None
+        await update.message.reply_text(f"✅ {len(lines)} naye broadcast messages successfully add ho gaye!")
+        await start(update, context)
+        return
+
     if state == 'WAITING_ADMIN_GRANT' and user_id == ADMIN_USER_ID:
         context.user_data['state'] = None
         try:
@@ -666,20 +752,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.sign_in(phone_num, code, phone_code_hash=phone_hash)
             me = await client.get_me()
             phone = f"+{me.phone}" if me and me.phone else phone_num
+            name = me.first_name if me and me.first_name else phone
             
             await client(UpdateStatusRequest(offline=False))
             asyncio.create_task(keep_client_alive(client))
             
-            # Auto-assign global/pre-set messages if available
             data = load_data()
             global_msgs = data.get("global_messages", [])
             
-            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': global_msgs, 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
+            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': global_msgs, 'group_delay': 2, 'resend_interval': 60, 'auto_reply': '', 'name': name}
             setup_dm_handler(client, acc_dict)
             runtime['accounts'].append(acc_dict)
             save_user_meta_to_disk(user_id)
             context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Account <b>{phone}</b> successfully login ho gaya aur messages bhi set ho gaye!", parse_mode="HTML")
+            await update.message.reply_text(f"✅ Account <b>{name} ({phone})</b> successfully login ho gaya!", parse_mode="HTML")
             await start(update, context)
         except SessionPasswordNeededError:
             context.user_data['state'] = 'WAITING_PHONE_PASSWORD'
@@ -698,6 +784,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.sign_in(password=password)
             me = await client.get_me()
             phone = f"+{me.phone}" if me and me.phone else phone_num
+            name = me.first_name if me and me.first_name else phone
             
             await client(UpdateStatusRequest(offline=False))
             asyncio.create_task(keep_client_alive(client))
@@ -705,12 +792,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data = load_data()
             global_msgs = data.get("global_messages", [])
             
-            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': global_msgs, 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
+            acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': global_msgs, 'group_delay': 2, 'resend_interval': 60, 'auto_reply': '', 'name': name}
             setup_dm_handler(client, acc_dict)
             runtime['accounts'].append(acc_dict)
             save_user_meta_to_disk(user_id)
             context.user_data['state'] = None
-            await update.message.reply_text(f"✅ Password verified! Account <b>{phone}</b> login ho gaya.", parse_mode="HTML")
+            await update.message.reply_text(f"✅ Password verified! Account <b>{name}</b> login ho gaya.", parse_mode="HTML")
             await start(update, context)
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
@@ -727,6 +814,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if await client.is_user_authorized():
                 me = await client.get_me()
                 phone = f"+{me.phone}" if me and me.phone else f"Session_{user_id}"
+                name = me.first_name if me and me.first_name else phone
                 
                 with open(f"{s_path}.session", "w") as f:
                     f.write(client.session.save())
@@ -736,12 +824,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data = load_data()
                 global_msgs = data.get("global_messages", [])
                 
-                acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': global_msgs, 'group_delay': 2, 'resend_interval': 60, 'auto_reply': ''}
+                acc_dict = {'phone': phone, 'client': client, 'active': True, 'messages': global_msgs, 'group_delay': 2, 'resend_interval': 60, 'auto_reply': '', 'name': name}
                 setup_dm_handler(client, acc_dict)
                 runtime['accounts'].append(acc_dict)
                 save_user_meta_to_disk(user_id)
                 context.user_data['state'] = None
-                await update.message.reply_text(f"✅ String Session Account <b>{phone}</b> added!", parse_mode="HTML")
+                await update.message.reply_text(f"✅ String Session Account <b>{name}</b> added!", parse_mode="HTML")
                 await start(update, context)
             else:
                 await update.message.reply_text("❌ Invalid Session String!")
@@ -749,25 +837,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
             context.user_data['state'] = None
-        return
-
-    elif state == 'WAITING_GLOBAL_MSG':
-        # Split by newlines so 10+ messages can be entered line by line
-        lines = [l.strip() for l in user_text.split('\n') if l.strip()]
-        
-        # Save globally so future accounts also get them automatically
-        data = load_data()
-        data["global_messages"] = lines
-        save_data(data)
-        
-        # Apply to all currently logged-in accounts for this user
-        for acc in runtime['accounts']:
-            acc['messages'] = lines
-        save_user_meta_to_disk(user_id)
-        
-        context.user_data['state'] = None
-        await update.message.reply_text(f"✅ Successfully set <b>{len(lines)} Broadcast Messages</b>!\nAbhi ke aur aane wale sabhi accounts par yeh rotation me chalenge.", parse_mode="HTML")
-        await start(update, context)
         return
 
     elif state == 'WAITING_GLOBAL_DM':
